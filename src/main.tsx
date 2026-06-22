@@ -1,7 +1,18 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft, RotateCw, ArrowDown, ChevronsDown, Pause } from "lucide-react";
+import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft, RotateCw, ArrowDown, ChevronsDown, Pause, Volume2, VolumeX, Menu } from "lucide-react";
 import "./styles.css";
+import {
+  isSoundEnabled,
+  setSoundEnabled,
+  playLineClear,
+  playLock,
+  playGarbage,
+  playWin,
+  playLose,
+  playCountdownTick,
+  playCountdownGo
+} from "./sounds";
 
 type Cell = number;
 type Board = Cell[][];
@@ -105,6 +116,17 @@ function addGarbage(board: Board, lines: number) {
   return { board: next, toppedOut };
 }
 
+function ghostY(board: Board, piece: Piece) {
+  let y = piece.y;
+  while (!collides(board, { ...piece, y }, 0, 1)) y++;
+  return y;
+}
+
+function ghostPiece(board: Board, piece: Piece | null): Piece | null {
+  if (!piece) return null;
+  return { ...piece, y: ghostY(board, piece) };
+}
+
 function paint(board: Board, piece: Piece | null) {
   const view = cloneBoard(board);
   if (!piece) return view;
@@ -118,12 +140,38 @@ function paint(board: Board, piece: Piece | null) {
   return view;
 }
 
-function BoardView({ state, small = false }: { state: PublicState | null; small?: boolean }) {
+function BoardView({
+  state,
+  small = false,
+  ghost = null
+}: {
+  state: PublicState | null;
+  small?: boolean;
+  ghost?: Piece | null;
+}) {
   const view = state ? paint(state.board, state.active) : emptyBoard();
+  const ghostCells = new Map<string, number>();
+  if (ghost && state) {
+    ghost.matrix.forEach((row, y) => {
+      row.forEach((value, x) => {
+        if (value) ghostCells.set(`${ghost.x + x}-${ghost.y + y}`, value);
+      });
+    });
+  }
+
   return (
     <div className={small ? "board small" : "board"} aria-label={small ? "Opponent board" : "Your board"}>
       {view.flatMap((row, y) =>
-        row.map((cell, x) => <div className={`cell ${cell ? COLORS[cell] : ""}`} key={`${x}-${y}`} />)
+        row.map((cell, x) => {
+          const ghostColor = ghostCells.get(`${x}-${y}`);
+          const showGhost = ghostColor && !cell;
+          return (
+            <div
+              className={showGhost ? `cell ghost ${COLORS[ghostColor]}` : `cell ${cell ? COLORS[cell] : ""}`}
+              key={`${x}-${y}`}
+            />
+          );
+        })
       )}
     </div>
   );
@@ -212,7 +260,8 @@ function MobileControls({
   onRight,
   onRotate,
   onSoftDrop,
-  onHardDrop
+  onHardDrop,
+  onHold
 }: {
   visible: boolean;
   onLeft: () => void;
@@ -220,6 +269,7 @@ function MobileControls({
   onRotate: () => void;
   onSoftDrop: () => void;
   onHardDrop: () => void;
+  onHold: () => void;
 }) {
   const left = useTouchRepeat(onLeft);
   const right = useTouchRepeat(onRight);
@@ -230,6 +280,9 @@ function MobileControls({
 
   return (
     <div className="mobile-controls" aria-label="Touch controls">
+      <button type="button" className="mobile-btn hold" aria-label="Hold piece" onPointerDown={(event) => { event.preventDefault(); onHold(); }}>
+        Hold
+      </button>
       <button type="button" className="mobile-btn rotate" aria-label="Rotate" {...rotate}>
         <RotateCw size={24} />
       </button>
@@ -257,6 +310,12 @@ function MobileControls({
   );
 }
 
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
+}
+
 function getSocketUrl(room: string, name: string) {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const params = new URLSearchParams({ room, name });
@@ -270,7 +329,8 @@ function useBattleSocket(
   onStart: () => void,
   onMatchWon: () => void,
   onWinner: (winner: string, loser: string) => void,
-  onMatchPause: (paused: boolean, by?: string | null) => void
+  onMatchPause: (paused: boolean, by?: string | null) => void,
+  onChatMessage: (message: ChatMessage) => void
 ) {
   const [socket, setSocket] = React.useState<WebSocket | null>(null);
   const [me, setMe] = React.useState("");
@@ -289,11 +349,13 @@ function useBattleSocket(
   const onMatchWonRef = React.useRef(onMatchWon);
   const onWinnerRef = React.useRef(onWinner);
   const onMatchPauseRef = React.useRef(onMatchPause);
+  const onChatMessageRef = React.useRef(onChatMessage);
   onGarbageRef.current = onGarbage;
   onStartRef.current = onStart;
   onMatchWonRef.current = onMatchWon;
   onWinnerRef.current = onWinner;
   onMatchPauseRef.current = onMatchPause;
+  onChatMessageRef.current = onChatMessage;
 
   const applyRoom = React.useCallback((message: any) => {
     setPlayers(message.players || []);
@@ -323,7 +385,10 @@ function useBattleSocket(
         history.replaceState(null, "", `?room=${message.room}`);
       }
       if (message.type === "room") applyRoom(message);
-      if (message.type === "chat") setChat((current) => [...current.slice(-59), message.message]);
+      if (message.type === "chat") {
+        setChat((current) => [...current.slice(-59), message.message]);
+        onChatMessageRef.current(message.message);
+      }
       if (message.type === "garbage") onGarbageRef.current(message.lines);
       if (message.type === "startMatch") onStartRef.current();
       if (message.type === "matchPause") onMatchPauseRef.current(message.paused, message.by || null);
@@ -366,14 +431,25 @@ function App() {
   const [sideCollapsed, setSideCollapsed] = React.useState(false);
   const [showChat, setShowChat] = React.useState(false);
   const [showInfo, setShowInfo] = React.useState(false);
+  const [showMobileMenu, setShowMobileMenu] = React.useState(false);
+  const [unreadCount, setUnreadCount] = React.useState(0);
+  const [chatToast, setChatToast] = React.useState("");
+  const [soundOn, setSoundOn] = React.useState(isSoundEnabled);
   const [paused, setPaused] = React.useState(false);
   const [pausedBy, setPausedBy] = React.useState<string | null>(null);
+  const [countdown, setCountdown] = React.useState<number | null>(null);
+  const [holdPiece, setHoldPiece] = React.useState<Piece | null>(null);
+  const chatLogRef = React.useRef<HTMLDivElement>(null);
+  const showChatRef = React.useRef(showChat);
   const boardRef = React.useRef(board);
   const activeRef = React.useRef(active);
   const nextPiecesRef = React.useRef(nextPieces);
   const gameOverRef = React.useRef(gameOver);
   const startedRef = React.useRef(started);
   const pausedRef = React.useRef(paused);
+  const countdownRef = React.useRef<number | null>(countdown);
+  const holdPieceRef = React.useRef(holdPiece);
+  const canHoldRef = React.useRef(true);
   const lastDrop = React.useRef(0);
   const lockingRef = React.useRef(false);
   const pendingGameOverNotify = React.useRef(false);
@@ -392,7 +468,9 @@ function App() {
     setLevel(1);
     setGameOver(false);
     setEndReason(null);
-    setStarted(true);
+    setStarted(false);
+    setCountdown(3);
+    setHoldPiece(null);
     setPaused(false);
     setPausedBy(null);
     setOpponentSnapshot(null);
@@ -402,9 +480,12 @@ function App() {
     boardRef.current = fresh;
     activeRef.current = piece;
     nextPiecesRef.current = queue;
+    holdPieceRef.current = null;
+    canHoldRef.current = true;
     gameOverRef.current = false;
-    startedRef.current = true;
+    startedRef.current = false;
     pausedRef.current = false;
+    countdownRef.current = 3;
   }, []);
 
   const finishRound = React.useCallback((message = "Game over", notifyOpponent = false, reason: EndReason = "lost") => {
@@ -428,10 +509,13 @@ function App() {
     lockingRef.current = false;
     setTimeout(() => setFlash(""), 1100);
     if (notifyOpponent) pendingGameOverNotify.current = true;
+    if (reason === "won") playWin();
+    else if (reason === "lost") playLose();
   }, []);
 
   const handleGarbage = React.useCallback((incoming: number) => {
-    if (!incoming || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+    if (!incoming || !startedRef.current || gameOverRef.current || pausedRef.current || countdownRef.current !== null) return;
+    playGarbage();
     setFlash(`+${incoming} garbage`);
     setTimeout(() => setFlash(""), 700);
     setBoard((current) => {
@@ -467,6 +551,18 @@ function App() {
     }
   }, [name]);
 
+  const handleChatMessage = React.useCallback((message: ChatMessage) => {
+    if (message.from === name) return;
+    if (!showChatRef.current) {
+      setUnreadCount((count) => count + 1);
+      if (!message.system) {
+        const preview = message.text.length > 48 ? `${message.text.slice(0, 48)}…` : message.text;
+        setChatToast(`${message.from}: ${preview}`);
+        window.setTimeout(() => setChatToast(""), 2500);
+      }
+    }
+  }, [name]);
+
   const { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, chat, role, status } = useBattleSocket(
     room,
     name,
@@ -474,7 +570,8 @@ function App() {
     startRound,
     handleMatchWon,
     handleWinner,
-    handleMatchPause
+    handleMatchPause,
+    handleChatMessage
   );
 
   const state: PublicState = { board, active, score, lines, level, started, gameOver };
@@ -502,7 +599,7 @@ function App() {
   const opponentLabel = opponent?.name || opponentNameSnapshot || "Waiting for friend";
   const invite = `${location.origin}${location.pathname}?room=${serverRoom}`;
 
-  const canPause = isPlayer && started && !gameOver;
+  const canPause = isPlayer && started && !gameOver && countdown === null;
   const togglePause = React.useCallback(() => {
     if (!canPause) return;
     send({ type: "setPause", paused: !paused });
@@ -511,6 +608,45 @@ function App() {
   React.useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
+
+  React.useEffect(() => {
+    countdownRef.current = countdown;
+  }, [countdown]);
+
+  React.useEffect(() => {
+    holdPieceRef.current = holdPiece;
+  }, [holdPiece]);
+
+  React.useEffect(() => {
+    showChatRef.current = showChat;
+    if (showChat) setUnreadCount(0);
+  }, [showChat]);
+
+  React.useEffect(() => {
+    if (!showChat) return;
+    requestAnimationFrame(() => {
+      const log = chatLogRef.current;
+      if (log) log.scrollTop = log.scrollHeight;
+    });
+  }, [chat, showChat]);
+
+  React.useEffect(() => {
+    if (countdown === null) return;
+    if (countdown > 0) playCountdownTick();
+    else playCountdownGo();
+    if (countdown === 0) {
+      const timer = window.setTimeout(() => {
+        setCountdown(null);
+        countdownRef.current = null;
+        setStarted(true);
+        startedRef.current = true;
+        lastDrop.current = performance.now();
+      }, 450);
+      return () => window.clearTimeout(timer);
+    }
+    const timer = window.setTimeout(() => setCountdown((value) => (value !== null && value > 0 ? value - 1 : 0)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [countdown]);
 
   React.useEffect(() => {
     if (opponent?.state) setOpponentSnapshot(opponent.state);
@@ -545,9 +681,10 @@ function App() {
   const lockPiece = React.useCallback(() => {
     if (lockingRef.current) return;
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current || countdownRef.current !== null) return;
     if (!collides(boardRef.current, piece, 0, 1)) return;
     lockingRef.current = true;
+    canHoldRef.current = true;
 
     const merged = merge(boardRef.current, piece);
     const result = clearLines(merged);
@@ -557,7 +694,9 @@ function App() {
     const newLines = lines + result.cleared;
     const newLevel = levelForLines(newLines);
 
+    playLock();
     if (result.cleared) {
+      playLineClear();
       send({ type: "lineClear", lines: result.cleared });
       setFlash(`${result.cleared} line${result.cleared > 1 ? "s" : ""} sent`);
       setTimeout(() => setFlash(""), 700);
@@ -588,9 +727,12 @@ function App() {
     lockingRef.current = false;
   }, [finishRound, lines, send]);
 
+  const playing = () =>
+    startedRef.current && !gameOverRef.current && !pausedRef.current && countdownRef.current === null;
+
   const move = React.useCallback((dx: number) => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+    if (!piece || !playing()) return;
     if (!collides(boardRef.current, piece, dx, 0)) {
       const next = { ...piece, x: piece.x + dx };
       activeRef.current = next;
@@ -600,7 +742,7 @@ function App() {
 
   const softDrop = React.useCallback(() => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+    if (!piece || !playing()) return;
     if (!collides(boardRef.current, piece, 0, 1)) {
       const next = { ...piece, y: piece.y + 1 };
       activeRef.current = next;
@@ -612,7 +754,7 @@ function App() {
 
   const hardDrop = React.useCallback(() => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+    if (!piece || !playing()) return;
     let y = piece.y;
     while (!collides(boardRef.current, { ...piece, y }, 0, 1)) y++;
     const next = { ...piece, y };
@@ -623,7 +765,7 @@ function App() {
 
   const rotateActive = React.useCallback(() => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+    if (!piece || !playing()) return;
     const matrix = rotate(piece.matrix);
     const kick = [0, -1, 1, -2, 2].find((offset) => !collides(boardRef.current, piece, offset, 0, matrix));
     if (kick !== undefined) {
@@ -633,18 +775,64 @@ function App() {
     }
   }, []);
 
+  const stashHold = (piece: Piece): Piece => ({
+    key: piece.key,
+    matrix: piece.matrix.map((row) => [...row]),
+    x: 0,
+    y: 0
+  });
+
+  const holdActive = React.useCallback(() => {
+    const piece = activeRef.current;
+    if (!piece || !playing() || !canHoldRef.current) return;
+    canHoldRef.current = false;
+    const currentHold = holdPieceRef.current;
+    if (!currentHold) {
+      const queue = nextPiecesRef.current.length ? nextPiecesRef.current : [randomPiece(), randomPiece(), randomPiece()];
+      const nextPiece = spawnPiece(queue[0]);
+      const nextQueue = [...queue.slice(1), randomPiece()];
+      if (collides(boardRef.current, nextPiece)) {
+        canHoldRef.current = true;
+        return;
+      }
+      const stored = stashHold(piece);
+      holdPieceRef.current = stored;
+      setHoldPiece(stored);
+      activeRef.current = nextPiece;
+      setActive(nextPiece);
+      nextPiecesRef.current = nextQueue;
+      setNextPieces(nextQueue);
+      return;
+    }
+    const swapped = spawnPiece(currentHold);
+    if (collides(boardRef.current, swapped)) {
+      canHoldRef.current = true;
+      return;
+    }
+    const stored = stashHold(piece);
+    holdPieceRef.current = stored;
+    setHoldPiece(stored);
+    activeRef.current = swapped;
+    setActive(swapped);
+  }, []);
+
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (isTypingTarget(event.target)) return;
       const key = event.key.toLowerCase();
-      if (key === "p" && isPlayer && startedRef.current && !gameOverRef.current) {
+      if (key === "p" && isPlayer && startedRef.current && !gameOverRef.current && countdownRef.current === null) {
         event.preventDefault();
         togglePause();
         return;
       }
-      const gameKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", " ", "a", "d", "s", "w"];
+      const gameKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", " ", "a", "d", "s", "w", "c", "shift"];
       if (!gameKeys.includes(key)) return;
       event.preventDefault();
-      if (!isPlayer || !startedRef.current || gameOverRef.current || pausedRef.current) return;
+      if (!isPlayer || !playing()) return;
+      if (key === "c" || event.key === "Shift") {
+        holdActive();
+        return;
+      }
       if (event.key === "ArrowLeft" || key === "a") move(-1);
       if (event.key === "ArrowRight" || key === "d") move(1);
       if (event.key === "ArrowDown" || key === "s") softDrop();
@@ -653,15 +841,15 @@ function App() {
     };
     window.addEventListener("keydown", onKey, { passive: false });
     return () => window.removeEventListener("keydown", onKey);
-  }, [hardDrop, isPlayer, move, rotateActive, softDrop, togglePause]);
+  }, [hardDrop, holdActive, isPlayer, move, rotateActive, softDrop, togglePause]);
 
-  const mobileControlsActive = isPlayer && started && !gameOver && !paused;
+  const mobileControlsActive = isPlayer && started && !gameOver && !paused && countdown === null;
   const boardSwipe = useBoardSwipe(mobileControlsActive, move, softDrop, hardDrop, rotateActive);
 
   React.useEffect(() => {
     let frame = 0;
     const tick = (time: number) => {
-      if (startedRef.current && !gameOverRef.current && !pausedRef.current && time - lastDrop.current > dropIntervalForLevel(level)) {
+      if (startedRef.current && !gameOverRef.current && !pausedRef.current && countdownRef.current === null && time - lastDrop.current > dropIntervalForLevel(level)) {
         softDrop();
         lastDrop.current = time;
       }
@@ -750,7 +938,7 @@ function App() {
 
   const renderChatPanel = (autoFocus = false) => (
     <div className="chat-panel">
-      <div className="chat-log">
+      <div className="chat-log" ref={chatLogRef}>
         {chat.map((message) => (
           <div className={message.system ? "chat-message system" : "chat-message"} key={message.id}>
             <strong>{message.from}</strong>
@@ -782,8 +970,27 @@ function App() {
     </div>
   );
 
+  const toggleSound = () => {
+    const next = !soundOn;
+    setSoundOn(next);
+    setSoundEnabled(next);
+  };
+
+  const openChat = () => {
+    setShowMobileMenu(false);
+    setShowChat(true);
+  };
+
+  const openInfo = () => {
+    setShowMobileMenu(false);
+    setShowInfo(true);
+  };
+
+  const ghost = showMatchLayout && started && !gameOver && countdown === null && active ? ghostPiece(board, active) : null;
+
   return (
     <main className="app">
+      {chatToast && <div className="chat-toast" role="status">{chatToast}</div>}
       {winnerBanner && (
         <div className="winner-overlay" role="status" aria-live="assertive">
           <div className="winner-content">
@@ -807,6 +1014,13 @@ function App() {
             <button type="submit" title="Save name"><LogIn size={18} /></button>
           </form>
           <button onClick={copyInvite} title="Copy invite link"><Copy size={18} /></button>
+          <button
+            onClick={toggleSound}
+            title={soundOn ? "Mute sounds" : "Enable sounds"}
+            className={soundOn ? "active-toggle" : ""}
+          >
+            {soundOn ? <Volume2 size={18} /> : <VolumeX size={18} />}
+          </button>
           <button onClick={rematch} disabled={!canRematch} title="Rematch"><RotateCcw size={18} /></button>
           <button
             onClick={togglePause}
@@ -816,18 +1030,63 @@ function App() {
           >
             {paused ? <Play size={18} /> : <Pause size={18} />}
           </button>
-          <button onClick={() => setShowChat(v => !v)} title="Toggle chat" className={showChat ? "active-toggle" : ""}>
+          <button onClick={() => setShowChat((value) => !value)} title="Toggle chat" className={showChat ? "active-toggle" : ""}>
             <MessageSquare size={18} />
-            {chat.length > 0 && <span className="notif-dot" />}
+            {unreadCount > 0 && <span className="unread-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
           </button>
-          <button onClick={() => setShowInfo(v => !v)} title="Toggle room info" className={showInfo ? "active-toggle" : ""}>
+          <button onClick={() => setShowInfo((value) => !value)} title="Toggle room info" className={showInfo ? "active-toggle" : ""}>
             <Users size={18} />
           </button>
-          <button onClick={() => setSideCollapsed(v => !v)} title="Toggle controls panel">
+          <button onClick={() => setSideCollapsed((value) => !value)} title="Toggle controls panel" className="side-toggle">
             {sideCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
           </button>
         </div>
+        <button
+          type="button"
+          className="mobile-menu-btn"
+          onClick={() => setShowMobileMenu((value) => !value)}
+          aria-label="Open menu"
+          aria-expanded={showMobileMenu}
+        >
+          <Menu size={20} />
+          {unreadCount > 0 && <span className="unread-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
+        </button>
       </section>
+
+      {showMobileMenu && (
+        <div className="mobile-menu-overlay" onClick={() => setShowMobileMenu(false)}>
+          <div className="mobile-menu" onClick={(event) => event.stopPropagation()}>
+            <div className="mobile-menu-header">
+              <strong>Menu</strong>
+              <button type="button" onClick={() => setShowMobileMenu(false)} className="close-btn" aria-label="Close menu">
+                <X size={18} />
+              </button>
+            </div>
+            <form className="name-form mobile-menu-name" onSubmit={saveName}>
+              <input value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={18} aria-label="Username" />
+              <button type="submit"><LogIn size={16} /> Save</button>
+            </form>
+            <div className="mobile-menu-grid">
+              <button type="button" onClick={() => { copyInvite(); setShowMobileMenu(false); }}><Copy size={18} /> Copy link</button>
+              <button type="button" onClick={toggleSound} className={soundOn ? "active-toggle" : ""}>
+                {soundOn ? <Volume2 size={18} /> : <VolumeX size={18} />} {soundOn ? "Sound on" : "Sound off"}
+              </button>
+              <button type="button" onClick={() => { togglePause(); setShowMobileMenu(false); }} disabled={!canPause}>
+                {paused ? <Play size={18} /> : <Pause size={18} />} {paused ? "Resume" : "Pause"}
+              </button>
+              <button type="button" onClick={() => { rematch(); setShowMobileMenu(false); }} disabled={!canRematch}>
+                <RotateCcw size={18} /> Rematch
+              </button>
+              <button type="button" onClick={openChat} className={showChat ? "active-toggle" : ""}>
+                <MessageSquare size={18} /> Chat{unreadCount > 0 ? ` (${unreadCount})` : ""}
+              </button>
+              <button type="button" onClick={openInfo} className={showInfo ? "active-toggle" : ""}>
+                <Users size={18} /> Room info
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showChat && (
         <div className="popup-overlay" onClick={() => setShowChat(false)}>
@@ -911,52 +1170,66 @@ function App() {
           <div className="playfield" {...boardSwipe}>
             <div className="panel-head">
               <span>{primaryName}</span>
-              <strong>{primaryScore}</strong>
+              <div className="playfield-meta">
+                <span className="mobile-inline-stat">Ln <strong>{lines}</strong></span>
+                <span className="mobile-inline-stat">Lv <strong>{level}</strong></span>
+                <strong className="playfield-score">{primaryScore}</strong>
+              </div>
             </div>
-            <BoardView state={primaryState} />
-            {flash && <div className="toast">{flash}</div>}
-            {paused && (
-              <div className="pause-overlay">
-                <strong>{pausedBy && pausedBy !== name ? `Paused by ${pausedBy}` : "Paused"}</strong>
-                <button onClick={togglePause}><Play size={18} /> Resume</button>
-              </div>
-            )}
-            {showMatchLayout && !started && !gameOver && (
-              <button className="start" onClick={startMatch} disabled={!canStartMatch}>
-                <Play size={20} /> {canStartMatch ? "Start game" : "Waiting for opponent"}
-              </button>
-            )}
-            {showMatchLayout && gameOver && (
-              <div className="game-over">
-                <strong>{endReason === "won" ? "You win!" : "Game over"}</strong>
-                <span className="game-over-detail">
-                  {endReason === "won"
-                    ? hasQueueWaiting
-                      ? `${nextInQueue?.name || "Next player"} is up next.`
-                      : players.length < 2
-                        ? "Waiting for an opponent to join the queue."
-                        : "Your opponent was defeated."
-                    : "Your board topped out."}
-                </span>
-                {endReason === "won" && canRematch && (
-                  <button onClick={rematch} disabled={rematchQueued}>
-                    <RotateCcw size={20} /> {waitingForRematch ? "Waiting for opponent..." : rematchQueued ? "Ready" : "Play again"}
-                  </button>
-                )}
-                {endReason === "lost" && hasChallengeOffer && (
-                  <div className="queue-actions">
-                    <button onClick={acceptChallenge}><Play size={20} /> Play winner</button>
-                    <button onClick={passChallenge}>Pass</button>
-                  </div>
-                )}
-                {endReason === "lost" && !queued && !hasChallengeOffer && (
-                  <button onClick={joinQueue}><Play size={20} /> Join queue</button>
-                )}
-                {endReason === "lost" && queued && !hasChallengeOffer && (
-                  <span className="game-over-detail">Queued #{queuePosition} — you'll play when it's your turn.</span>
-                )}
-              </div>
-            )}
+            <div className="board-frame">
+              <BoardView
+                state={primaryState}
+                ghost={ghost}
+              />
+              {flash && <div className="toast">{flash}</div>}
+              {countdown !== null && (
+                <div className="countdown-overlay" aria-live="polite">
+                  <strong>{countdown === 0 ? "GO!" : countdown}</strong>
+                </div>
+              )}
+              {paused && (
+                <div className="pause-overlay">
+                  <strong>{pausedBy && pausedBy !== name ? `Paused by ${pausedBy}` : "Paused"}</strong>
+                  <button onClick={togglePause}><Play size={18} /> Resume</button>
+                </div>
+              )}
+              {showMatchLayout && !started && !gameOver && countdown === null && (
+                <button className="start" onClick={startMatch} disabled={!canStartMatch}>
+                  <Play size={20} /> {canStartMatch ? "Start game" : "Waiting for opponent"}
+                </button>
+              )}
+              {showMatchLayout && gameOver && (
+                <div className="game-over">
+                  <strong>{endReason === "won" ? "You win!" : "Game over"}</strong>
+                  <span className="game-over-detail">
+                    {endReason === "won"
+                      ? hasQueueWaiting
+                        ? `${nextInQueue?.name || "Next player"} is up next.`
+                        : players.length < 2
+                          ? "Waiting for an opponent to join the queue."
+                          : "Your opponent was defeated."
+                      : "Your board topped out."}
+                  </span>
+                  {endReason === "won" && canRematch && (
+                    <button onClick={rematch} disabled={rematchQueued}>
+                      <RotateCcw size={20} /> {waitingForRematch ? "Waiting for opponent..." : rematchQueued ? "Ready" : "Play again"}
+                    </button>
+                  )}
+                  {endReason === "lost" && hasChallengeOffer && (
+                    <div className="queue-actions">
+                      <button onClick={acceptChallenge}><Play size={20} /> Play winner</button>
+                      <button onClick={passChallenge}>Pass</button>
+                    </div>
+                  )}
+                  {endReason === "lost" && !queued && !hasChallengeOffer && (
+                    <button onClick={joinQueue}><Play size={20} /> Join queue</button>
+                  )}
+                  {endReason === "lost" && queued && !hasChallengeOffer && (
+                    <span className="game-over-detail">Queued #{queuePosition} — you'll play when it's your turn.</span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           <aside className={"side" + (sideCollapsed ? " collapsed" : "")}>
@@ -967,12 +1240,23 @@ function App() {
 
             {renderPlayersList()}
 
-            <div className="next-panel">
-              <div className="panel-head">
-                <span>Next pieces</span>
+            <div className="preview-column">
+              <div className="hold-panel">
+                <div className="panel-head">
+                  <span>Hold</span>
+                </div>
+                <div className="hold-slot">
+                  {holdPiece ? <PiecePreview piece={holdPiece} /> : <div className="hold-empty" />}
+                </div>
               </div>
-              <div className="next-list">
-                {nextPieces.map((piece, index) => <PiecePreview piece={piece} key={`${piece.key}-${index}`} />)}
+
+              <div className="next-panel">
+                <div className="panel-head">
+                  <span>Next</span>
+                </div>
+                <div className="next-list">
+                  {nextPieces.map((piece, index) => <PiecePreview piece={piece} key={`${piece.key}-${index}`} />)}
+                </div>
               </div>
             </div>
 
@@ -991,6 +1275,7 @@ function App() {
               <div className="keys">
                 <span>Move</span><b>A/D or ←/→</b>
                 <span>Rotate</span><b>W or ↑</b>
+                <span>Hold</span><b>C or Shift</b>
                 <span>Drop</span><b>Space</b>
               </div>
             </div>
@@ -1002,6 +1287,7 @@ function App() {
             onRotate={rotateActive}
             onSoftDrop={softDrop}
             onHardDrop={hardDrop}
+            onHold={holdActive}
           />
         </section>
       )}
