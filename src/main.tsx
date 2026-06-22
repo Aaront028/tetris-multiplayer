@@ -32,7 +32,7 @@ type Player = { id: string; name: string; connected: boolean; role?: Role; state
 type Spectator = { id: string; name: string; connected: boolean };
 type QueueEntry = { id: string; name: string };
 type ChatMessage = { id: string; at: number; from: string; text: string; system?: boolean };
-type EndReason = "lost" | "won" | null;
+type EndReason = "lost" | "won" | "practice" | null;
 
 const WIDTH = 10;
 const HEIGHT = 20;
@@ -341,6 +341,7 @@ function useBattleSocket(
   const [pendingChallengerId, setPendingChallengerId] = React.useState<string | null>(null);
   const [chat, setChat] = React.useState<ChatMessage[]>([]);
   const [rematchReady, setRematchReady] = React.useState<string[]>([]);
+  const [practiceMode, setPracticeMode] = React.useState(false);
   const [role, setRole] = React.useState<Role>("spectator");
   const [status, setStatus] = React.useState("Connecting");
 
@@ -364,6 +365,7 @@ function useBattleSocket(
     setPendingChallengerId(message.pendingChallengerId || null);
     setRematchReady(message.rematchReady || []);
     if (message.chat) setChat(message.chat);
+    if (typeof message.practiceMode === "boolean") setPracticeMode(message.practiceMode);
     if (typeof message.matchPaused === "boolean") {
       onMatchPauseRef.current(message.matchPaused, message.pausedBy || null);
     }
@@ -407,7 +409,7 @@ function useBattleSocket(
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }, [socket]);
 
-  return { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, chat, role, status };
+  return { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, practiceMode, chat, role, status };
 }
 
 function App() {
@@ -453,6 +455,8 @@ function App() {
   const lastDrop = React.useRef(0);
   const lockingRef = React.useRef(false);
   const pendingGameOverNotify = React.useRef(false);
+  const pendingPracticeOverNotify = React.useRef(false);
+  const soloPracticeRef = React.useRef(false);
   const [opponentSnapshot, setOpponentSnapshot] = React.useState<PublicState | null>(null);
   const [opponentNameSnapshot, setOpponentNameSnapshot] = React.useState("");
 
@@ -511,6 +515,7 @@ function App() {
     if (notifyOpponent) pendingGameOverNotify.current = true;
     if (reason === "won") playWin();
     else if (reason === "lost") playLose();
+    if (reason === "practice") pendingPracticeOverNotify.current = true;
   }, []);
 
   const handleGarbage = React.useCallback((incoming: number) => {
@@ -563,7 +568,7 @@ function App() {
     }
   }, [name]);
 
-  const { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, chat, role, status } = useBattleSocket(
+  const { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, practiceMode, chat, role, status } = useBattleSocket(
     room,
     name,
     handleGarbage,
@@ -593,17 +598,34 @@ function App() {
   const nextInQueue = queue[0];
   const hasQueueWaiting = queue.length > 0;
   const canRematch = gameOver && endReason === "won" && !hasQueueWaiting && !pendingChallengerId && players.length >= 2 && players.every((player) => player.connected);
-  const canStartMatch = (isPlayer || gameOver) && players.length >= 2 && players.every((player) => player.connected);
+  const canStartMatch =
+    (isPlayer || gameOver) &&
+    players.length >= 2 &&
+    players.every((player) => player.connected) &&
+    !players.some((player) => player.state?.started && !player.state?.gameOver);
+  const canStartSolo = isPlayer && players.length === 1 && players.every((player) => player.connected) && !started && countdown === null;
+  const isSoloPractice = practiceMode && players.length === 1 && started && !gameOver;
   const rematchQueued = rematchReady.includes(me);
   const waitingForRematch = gameOver && rematchQueued && rematchReady.length < players.length;
-  const opponentLabel = opponent?.name || opponentNameSnapshot || "Waiting for friend";
+  const opponentLabel = opponent?.name || opponentNameSnapshot || (players.length === 1 ? "Open slot" : "Waiting for friend");
   const invite = `${location.origin}${location.pathname}?room=${serverRoom}`;
 
   const canPause = isPlayer && started && !gameOver && countdown === null;
   const togglePause = React.useCallback(() => {
     if (!canPause) return;
+    if (players.length === 1) {
+      const next = !paused;
+      setPaused(next);
+      pausedRef.current = next;
+      setPausedBy(null);
+      return;
+    }
     send({ type: "setPause", paused: !paused });
-  }, [canPause, send, paused]);
+  }, [canPause, send, paused, players.length]);
+
+  React.useEffect(() => {
+    soloPracticeRef.current = practiceMode && players.length === 1;
+  }, [practiceMode, players.length]);
 
   React.useEffect(() => {
     pausedRef.current = paused;
@@ -648,6 +670,18 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [countdown]);
 
+  const prevPlayerCount = React.useRef(players.length);
+  React.useEffect(() => {
+    if (prevPlayerCount.current === 1 && players.length === 2 && isSoloPractice) {
+      const challenger = players.find((player) => player.id !== me);
+      if (challenger) {
+        setFlash(`${challenger.name} joined — finish your run!`);
+        window.setTimeout(() => setFlash(""), 2200);
+      }
+    }
+    prevPlayerCount.current = players.length;
+  }, [players.length, isSoloPractice, me, players]);
+
   React.useEffect(() => {
     if (opponent?.state) setOpponentSnapshot(opponent.state);
     if (opponent?.name) setOpponentNameSnapshot(opponent.name);
@@ -676,6 +710,10 @@ function App() {
       pendingGameOverNotify.current = false;
       send({ type: "gameOver" });
     }
+    if (pendingPracticeOverNotify.current && gameOver && isPlayer) {
+      pendingPracticeOverNotify.current = false;
+      send({ type: "gameOver" });
+    }
   }, [board, active, nextPieces, score, lines, level, started, gameOver, isPlayer, send]);
 
   const lockPiece = React.useCallback(() => {
@@ -697,8 +735,12 @@ function App() {
     playLock();
     if (result.cleared) {
       playLineClear();
-      send({ type: "lineClear", lines: result.cleared });
-      setFlash(`${result.cleared} line${result.cleared > 1 ? "s" : ""} sent`);
+      if (!soloPracticeRef.current) send({ type: "lineClear", lines: result.cleared });
+      setFlash(
+        soloPracticeRef.current
+          ? `${result.cleared} line${result.cleared > 1 ? "s" : ""}!`
+          : `${result.cleared} line${result.cleared > 1 ? "s" : ""} sent`
+      );
       setTimeout(() => setFlash(""), 700);
     }
 
@@ -711,7 +753,8 @@ function App() {
       activeRef.current = null;
       setActive(null);
       lockingRef.current = false;
-      finishRound("Game over", true, "lost");
+      if (soloPracticeRef.current) finishRound("Game over", false, "practice");
+      else finishRound("Game over", true, "lost");
       return;
     }
 
@@ -887,6 +930,11 @@ function App() {
     send({ type: "startMatch" });
   };
 
+  const startSolo = () => {
+    if (!canStartSolo) return;
+    send({ type: "startSolo" });
+  };
+
   const rematch = () => {
     if (!canRematch) return;
     send({ type: "rematch" });
@@ -1005,7 +1053,7 @@ function App() {
           <div className="topbar-meta">
             <span className="room-tag"><Users size={14} /> {serverRoom}</span>
             <span className="status-dot" data-connected={status === "Connected"} />
-            <span className="status-text">{paused ? "Paused" : isPlayer ? "Playing" : "Spectating"}</span>
+            <span className="status-text">{paused ? "Paused" : isSoloPractice ? "Practicing" : isPlayer ? "Playing" : "Spectating"}</span>
           </div>
         </div>
         <div className="actions">
@@ -1194,22 +1242,49 @@ function App() {
                 </div>
               )}
               {showMatchLayout && !started && !gameOver && countdown === null && (
-                <button className="start" onClick={startMatch} disabled={!canStartMatch}>
-                  <Play size={20} /> {canStartMatch ? "Start game" : "Waiting for opponent"}
-                </button>
+                <div className="start-actions">
+                  {canStartMatch ? (
+                    <button className="start" onClick={startMatch}>
+                      <Play size={20} /> Start battle
+                    </button>
+                  ) : canStartSolo ? (
+                    <>
+                      <button className="start" onClick={startSolo}>
+                        <Play size={20} /> Practice solo
+                      </button>
+                      <span className="start-hint">Anyone can join and challenge you</span>
+                    </>
+                  ) : (
+                    <button className="start" disabled>
+                      <Play size={20} /> Waiting for opponent
+                    </button>
+                  )}
+                </div>
               )}
               {showMatchLayout && gameOver && (
                 <div className="game-over">
-                  <strong>{endReason === "won" ? "You win!" : "Game over"}</strong>
+                  <strong>{endReason === "won" ? "You win!" : endReason === "practice" ? "Practice over" : "Game over"}</strong>
                   <span className="game-over-detail">
-                    {endReason === "won"
-                      ? hasQueueWaiting
-                        ? `${nextInQueue?.name || "Next player"} is up next.`
-                        : players.length < 2
-                          ? "Waiting for an opponent to join the queue."
-                          : "Your opponent was defeated."
-                      : "Your board topped out."}
+                    {endReason === "practice"
+                      ? players.length >= 2
+                        ? `${opponent?.name || "Your opponent"} is ready — start a battle!`
+                        : spectators.length > 0
+                          ? `${spectators.map((spectator) => spectator.name).join(", ")} can join the match.`
+                          : "Play another solo round or wait for a challenger."
+                      : endReason === "won"
+                        ? hasQueueWaiting
+                          ? `${nextInQueue?.name || "Next player"} is up next.`
+                          : players.length < 2
+                            ? "Waiting for an opponent to join the queue."
+                            : "Your opponent was defeated."
+                        : "Your board topped out."}
                   </span>
+                  {endReason === "practice" && canStartSolo && (
+                    <button onClick={startSolo}><RotateCcw size={20} /> Practice again</button>
+                  )}
+                  {endReason === "practice" && canStartMatch && (
+                    <button onClick={startMatch}><Play size={20} /> Start battle</button>
+                  )}
                   {endReason === "won" && canRematch && (
                     <button onClick={rematch} disabled={rematchQueued}>
                       <RotateCcw size={20} /> {waitingForRematch ? "Waiting for opponent..." : rematchQueued ? "Ready" : "Play again"}

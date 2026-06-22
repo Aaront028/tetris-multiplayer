@@ -22,7 +22,7 @@ if (process.env.NODE_ENV === "production" || existsSync(dist)) {
 
 function getRoom(code) {
   const key = (code || randomRoom()).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
-  if (!rooms.has(key)) rooms.set(key, { clients: new Map(), activeIds: [], queue: [], pendingChallengerId: null, chat: [], rematchReady: new Set(), matchPaused: false, pausedBy: null });
+  if (!rooms.has(key)) rooms.set(key, { clients: new Map(), activeIds: [], queue: [], pendingChallengerId: null, chat: [], rematchReady: new Set(), matchPaused: false, pausedBy: null, practiceMode: false });
   return [key, rooms.get(key)];
 }
 
@@ -72,8 +72,17 @@ function roomSnapshot(room) {
     chat: room.chat,
     rematchReady: [...(room.rematchReady || [])].filter((readyId) => room.clients.has(readyId)),
     matchPaused: Boolean(room.matchPaused),
-    pausedBy: room.pausedBy || null
+    pausedBy: room.pausedBy || null,
+    practiceMode: Boolean(room.practiceMode)
   };
+}
+
+function isVersusLive(room) {
+  if (room.activeIds.length < 2) return false;
+  return room.activeIds.every((activeId) => {
+    const client = room.clients.get(activeId);
+    return client?.state?.started && !client?.state?.gameOver;
+  });
 }
 
 function isLiveMatch(room) {
@@ -93,6 +102,7 @@ function beginMatch(room, by) {
   const ready = activeClients.length >= 2 && activeClients.every((entry) => entry.ws.readyState === entry.ws.OPEN);
   if (!ready) return false;
   room.rematchReady = new Set();
+  room.practiceMode = false;
   room.matchPaused = false;
   room.pausedBy = null;
   for (const activeId of room.activeIds) {
@@ -103,6 +113,21 @@ function beginMatch(room, by) {
     }
   }
   broadcastActive(room, { type: "startMatch", by, at: Date.now() });
+  broadcastRoom(room);
+  return true;
+}
+
+function beginSoloPractice(room, by) {
+  if (room.activeIds.length !== 1 || room.activeIds[0] !== by) return false;
+  const client = room.clients.get(by);
+  if (!client || client.ws.readyState !== client.ws.OPEN) return false;
+  room.rematchReady = new Set();
+  room.practiceMode = true;
+  room.matchPaused = false;
+  room.pausedBy = null;
+  client.state = null;
+  safeSend(client.ws, { type: "startMatch", solo: true, by, at: Date.now() });
+  addChat(room, client, `${client.name} started a solo practice round.`, true);
   broadcastRoom(room);
   return true;
 }
@@ -198,7 +223,7 @@ wss.on("connection", (ws, request) => {
     }
 
     if (message.type === "lineClear" && isActive) {
-      if (room.matchPaused) return;
+      if (room.matchPaused || !isVersusLive(room)) return;
       const lines = Math.max(0, Math.min(4, Number(message.lines) || 0));
       broadcastActiveExcept(room, id, { type: "garbage", lines, from: id });
     }
@@ -216,6 +241,10 @@ wss.on("connection", (ws, request) => {
       beginMatch(room, id);
     }
 
+    if (message.type === "startSolo" && isActive) {
+      beginSoloPractice(room, id);
+    }
+
     if (message.type === "rematch" && isActive) {
       if (!room.rematchReady) room.rematchReady = new Set();
       room.rematchReady.add(id);
@@ -225,6 +254,17 @@ wss.on("connection", (ws, request) => {
     }
 
     if (message.type === "gameOver" && isActive) {
+      if (room.practiceMode && room.activeIds.length === 1) {
+        if (client.state) {
+          client.state = { ...client.state, gameOver: true, started: false, active: null };
+        }
+        room.practiceMode = false;
+        room.matchPaused = false;
+        room.pausedBy = null;
+        broadcastRoom(room);
+        return;
+      }
+
       if (client.role === "spectator" && client.state?.gameOver) return;
       const loserId = id;
       const winnerId = room.activeIds.find((activeId) => activeId !== loserId) || null;
@@ -257,7 +297,18 @@ wss.on("connection", (ws, request) => {
       client.role = "player";
       client.state = null;
       room.activeIds.push(id);
-      addChat(room, client, `${client.name} joined the match.`, true);
+      const practicing = room.practiceMode && room.activeIds.some((activeId) => {
+        const activeClient = room.clients.get(activeId);
+        return activeId !== id && activeClient?.state?.started && !activeClient?.state?.gameOver;
+      });
+      addChat(
+        room,
+        client,
+        practicing
+          ? `${client.name} joined — waiting for the practice round to finish.`
+          : `${client.name} joined the match.`,
+        true
+      );
       broadcastRoom(room);
     }
     if (message.type === "joinQueue" && !isActive) {

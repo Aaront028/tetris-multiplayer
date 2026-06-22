@@ -505,6 +505,31 @@ p {
   border-color: transparent;
 }
 
+.start-actions {
+  position: absolute;
+  left: 50%;
+  top: 54%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  width: min(260px, calc(100% - 36px));
+}
+
+.start-actions .start {
+  position: static;
+  transform: none;
+  width: 100%;
+}
+
+.start-hint {
+  color: #aeb8c8;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: center;
+}
+
 .game-over {
   position: absolute;
   left: 50%;
