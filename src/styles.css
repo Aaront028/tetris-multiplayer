@@ -1,0 +1,473 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #111318;
+  color: #f5f7fb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100dvh;
+  overflow-x: hidden;
+  background:
+    linear-gradient(135deg, rgba(30, 95, 116, 0.22), transparent 38%),
+    linear-gradient(315deg, rgba(185, 73, 57, 0.18), transparent 34%),
+    #111318;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #3a4658;
+  border-radius: 8px;
+  background: #202735;
+  color: #f5f7fb;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2b3548;
+}
+
+.app {
+  width: min(1180px, calc(100vw - 28px));
+  margin: 0 auto;
+  min-height: 100dvh;
+  padding: 14px 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 3.7rem);
+  line-height: 0.9;
+}
+
+p {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  color: #b7c0cf;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.arena {
+  display: grid;
+  grid-template-columns: minmax(260px, min(46vw, calc((100dvh - 152px) / 2))) minmax(300px, 1fr);
+  gap: 18px;
+  align-items: start;
+  position: relative;
+}
+
+.playfield,
+.opponent {
+  position: relative;
+}
+
+.panel-head,
+.stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #dce3ee;
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.panel-head strong,
+.stats strong {
+  color: #ffcf5d;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  width: min(100%, 520px, calc((100dvh - 152px) / 2));
+  aspect-ratio: 1 / 2;
+  border: 2px solid #3b4658;
+  background: #090b0f;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+}
+
+.board.small {
+  width: min(100%, 250px);
+}
+
+.cell {
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  background: #10141c;
+}
+
+.cyan { background: linear-gradient(145deg, #49bdd3, #238aa3); }
+.blue { background: linear-gradient(145deg, #5f76d7, #334aa5); }
+.orange { background: linear-gradient(145deg, #d8954d, #a85f25); }
+.yellow { background: linear-gradient(145deg, #d8bf52, #a88c24); }
+.green { background: linear-gradient(145deg, #57bd79, #2b8d50); }
+.purple { background: linear-gradient(145deg, #a777d1, #744ba5); }
+.red { background: linear-gradient(145deg, #d96c72, #a93a44); }
+.garbage { background: linear-gradient(145deg, #707a89, #4f5866); }
+
+.cyan,
+.blue,
+.orange,
+.yellow,
+.green,
+.purple,
+.red,
+.garbage {
+  border-color: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.14), inset 0 -3px 0 rgba(0, 0, 0, 0.22);
+}
+
+.side {
+  display: grid;
+  grid-template-columns: minmax(150px, 210px) minmax(210px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.stats {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+}
+
+.stats span,
+.keys,
+.next-panel {
+  border: 1px solid #30394a;
+  border-radius: 8px;
+  background: rgba(20, 25, 35, 0.82);
+  padding: 14px;
+}
+
+.stats span {
+  display: flex;
+  justify-content: space-between;
+}
+
+.keys {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px 18px;
+  color: #aeb8c8;
+}
+
+.keys b {
+  color: #f5f7fb;
+}
+
+.next-panel {
+  padding: 12px;
+}
+
+.next-panel .panel-head {
+  margin-bottom: 8px;
+}
+
+.next-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.piece-preview {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  aspect-ratio: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.preview-cell {
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.preview-cell.cyan,
+.preview-cell.blue,
+.preview-cell.orange,
+.preview-cell.yellow,
+.preview-cell.green,
+.preview-cell.purple,
+.preview-cell.red {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 -2px 0 rgba(0, 0, 0, 0.18);
+  opacity: 0.82;
+}
+
+.toast {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  border-radius: 8px;
+  background: rgba(255, 207, 93, 0.94);
+  color: #1b1604;
+  padding: 12px 18px;
+  font-weight: 900;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.start {
+  position: absolute;
+  left: 50%;
+  top: 54%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  min-width: 148px;
+  background: #ffcf5d;
+  color: #211700;
+  border-color: transparent;
+}
+
+.game-over {
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  z-index: 5;
+  display: grid;
+  gap: 14px;
+  width: min(260px, calc(100% - 36px));
+  transform: translate(-50%, -50%);
+  border: 1px solid #ffcf5d;
+  border-radius: 8px;
+  background: rgba(12, 15, 21, 0.94);
+  padding: 18px;
+  text-align: center;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+}
+
+.game-over strong {
+  color: #ffcf5d;
+  font-size: 1.45rem;
+}
+
+@media (max-width: 820px) {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    position: fixed;
+    width: 100%;
+  }
+
+  button {
+    min-height: 38px;
+    padding: 8px 10px;
+    font-size: 0.9rem;
+  }
+
+  .app {
+    width: 100vw;
+    height: 100dvh;
+    overflow: hidden;
+    padding: 8px;
+  }
+
+  .topbar {
+    align-items: center;
+    flex-direction: row;
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+
+  h1 {
+    font-size: clamp(1.55rem, 8vw, 2.35rem);
+  }
+
+  p {
+    gap: 5px;
+    margin-top: 3px;
+    font-size: 0.78rem;
+  }
+
+  .actions {
+    flex: 0 0 auto;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .actions button {
+    width: 40px;
+    padding: 8px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .actions button svg {
+    flex: 0 0 auto;
+  }
+
+  .arena {
+    display: block;
+    height: calc(100dvh - 72px);
+    min-height: 0;
+  }
+
+  .playfield {
+    width: min(100%, calc((100dvh - 112px) / 2));
+    margin: 0 auto;
+  }
+
+  .panel-head {
+    margin-bottom: 6px;
+    font-size: 0.9rem;
+  }
+
+  .board {
+    width: min(100%, calc(100vw - 16px), calc((100dvh - 112px) / 2));
+    border-width: 1px;
+  }
+
+  .board.small {
+    width: 68px;
+    box-shadow: none;
+  }
+
+  .side {
+    position: absolute;
+    inset: 30px 0 0;
+    z-index: 3;
+    display: block;
+    pointer-events: none;
+  }
+
+  .stats {
+    position: absolute;
+    right: 4px;
+    top: -30px;
+    display: flex;
+    gap: 6px;
+    margin: 0;
+  }
+
+  .stats span {
+    gap: 6px;
+    min-width: 70px;
+    border-radius: 7px;
+    padding: 7px 8px;
+    font-size: 0.72rem;
+    background: rgba(20, 25, 35, 0.9);
+  }
+
+  .opponent {
+    position: absolute;
+    right: 4px;
+    top: 10px;
+    width: 76px;
+    padding: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 7px;
+    background: rgba(9, 11, 15, 0.72);
+    backdrop-filter: blur(6px);
+  }
+
+  .opponent .panel-head {
+    margin-bottom: 4px;
+    font-size: 0.58rem;
+    line-height: 1;
+  }
+
+  .opponent .panel-head span {
+    max-width: 48px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .next-panel {
+    position: absolute;
+    left: 4px;
+    bottom: 8px;
+    width: 112px;
+    padding: 8px;
+    background: rgba(20, 25, 35, 0.78);
+    backdrop-filter: blur(6px);
+  }
+
+  .next-panel .panel-head {
+    margin-bottom: 5px;
+    font-size: 0.66rem;
+  }
+
+  .next-list {
+    gap: 5px;
+  }
+
+  .piece-preview {
+    gap: 1px;
+  }
+
+  .preview-cell {
+    border-radius: 2px;
+  }
+
+  .keys {
+    display: none;
+  }
+
+  .start {
+    min-width: 130px;
+  }
+
+  .game-over {
+    width: min(230px, calc(100% - 32px));
+    padding: 14px;
+  }
+}
+
+@media (max-height: 760px) and (min-width: 821px) {
+  button {
+    padding: 8px 12px;
+  }
+
+  h1 {
+    font-size: clamp(1.8rem, 4.2vw, 3rem);
+  }
+
+  p {
+    margin-top: 6px;
+  }
+
+  .keys {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .keys b {
+    font-size: 0.9rem;
+  }
+}
