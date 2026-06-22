@@ -22,7 +22,7 @@ if (process.env.NODE_ENV === "production" || existsSync(dist)) {
 
 function getRoom(code) {
   const key = (code || randomRoom()).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
-  if (!rooms.has(key)) rooms.set(key, { clients: new Map(), activeIds: [], queue: [], pendingChallengerId: null, chat: [], rematchReady: new Set() });
+  if (!rooms.has(key)) rooms.set(key, { clients: new Map(), activeIds: [], queue: [], pendingChallengerId: null, chat: [], rematchReady: new Set(), matchPaused: false, pausedBy: null });
   return [key, rooms.get(key)];
 }
 
@@ -70,8 +70,18 @@ function roomSnapshot(room) {
     queue: room.queue.map((id) => room.clients.get(id)).filter(Boolean).map((client) => ({ id: client.id, name: client.name })),
     pendingChallengerId: room.pendingChallengerId,
     chat: room.chat,
-    rematchReady: [...(room.rematchReady || [])].filter((readyId) => room.clients.has(readyId))
+    rematchReady: [...(room.rematchReady || [])].filter((readyId) => room.clients.has(readyId)),
+    matchPaused: Boolean(room.matchPaused),
+    pausedBy: room.pausedBy || null
   };
+}
+
+function isLiveMatch(room) {
+  if (room.activeIds.length < 2) return false;
+  return room.activeIds.every((activeId) => {
+    const client = room.clients.get(activeId);
+    return client?.state?.started && !client?.state?.gameOver;
+  });
 }
 
 function broadcast(room, data) {
@@ -83,6 +93,8 @@ function beginMatch(room, by) {
   const ready = activeClients.length >= 2 && activeClients.every((entry) => entry.ws.readyState === entry.ws.OPEN);
   if (!ready) return false;
   room.rematchReady = new Set();
+  room.matchPaused = false;
+  room.pausedBy = null;
   for (const activeId of room.activeIds) {
     const activeClient = room.clients.get(activeId);
     if (activeClient) {
@@ -186,8 +198,18 @@ wss.on("connection", (ws, request) => {
     }
 
     if (message.type === "lineClear" && isActive) {
+      if (room.matchPaused) return;
       const lines = Math.max(0, Math.min(4, Number(message.lines) || 0));
       broadcastActiveExcept(room, id, { type: "garbage", lines, from: id });
+    }
+
+    if (message.type === "setPause" && isActive) {
+      if (!isLiveMatch(room)) return;
+      const paused = Boolean(message.paused);
+      room.matchPaused = paused;
+      room.pausedBy = paused ? client.name : null;
+      broadcastActive(room, { type: "matchPause", paused, by: client.name });
+      broadcastRoom(room);
     }
 
     if (message.type === "startMatch" && isActive) {
@@ -215,6 +237,8 @@ wss.on("connection", (ws, request) => {
         client.state = { ...client.state, gameOver: true, started: false, active: null };
       }
       room.rematchReady = new Set();
+      room.matchPaused = false;
+      room.pausedBy = null;
       removeFromQueue(room, loserId);
       room.activeIds = room.activeIds.filter((activeId) => activeId !== loserId);
 

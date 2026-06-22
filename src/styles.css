@@ -412,6 +412,31 @@ p {
   font-weight: 600;
 }
 
+.pause-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  background: rgba(8, 10, 14, 0.72);
+  backdrop-filter: blur(3px);
+  border-radius: 4px;
+}
+
+.pause-overlay strong {
+  color: #ffcf5d;
+  font-size: 1.6rem;
+}
+
+.pause-overlay button {
+  min-width: 140px;
+  background: #ffcf5d;
+  color: #211700;
+  border-color: transparent;
+}
+
 .mobile-controls {
   display: none;
 }

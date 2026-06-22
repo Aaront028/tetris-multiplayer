@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft, RotateCw, ArrowDown, ChevronsDown } from "lucide-react";
+import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft, RotateCw, ArrowDown, ChevronsDown, Pause } from "lucide-react";
 import "./styles.css";
 
 type Cell = number;
@@ -269,7 +269,8 @@ function useBattleSocket(
   onGarbage: (lines: number) => void,
   onStart: () => void,
   onMatchWon: () => void,
-  onWinner: (winner: string, loser: string) => void
+  onWinner: (winner: string, loser: string) => void,
+  onMatchPause: (paused: boolean, by?: string | null) => void
 ) {
   const [socket, setSocket] = React.useState<WebSocket | null>(null);
   const [me, setMe] = React.useState("");
@@ -283,6 +284,17 @@ function useBattleSocket(
   const [role, setRole] = React.useState<Role>("spectator");
   const [status, setStatus] = React.useState("Connecting");
 
+  const onGarbageRef = React.useRef(onGarbage);
+  const onStartRef = React.useRef(onStart);
+  const onMatchWonRef = React.useRef(onMatchWon);
+  const onWinnerRef = React.useRef(onWinner);
+  const onMatchPauseRef = React.useRef(onMatchPause);
+  onGarbageRef.current = onGarbage;
+  onStartRef.current = onStart;
+  onMatchWonRef.current = onMatchWon;
+  onWinnerRef.current = onWinner;
+  onMatchPauseRef.current = onMatchPause;
+
   const applyRoom = React.useCallback((message: any) => {
     setPlayers(message.players || []);
     setSpectators(message.spectators || []);
@@ -290,16 +302,10 @@ function useBattleSocket(
     setPendingChallengerId(message.pendingChallengerId || null);
     setRematchReady(message.rematchReady || []);
     if (message.chat) setChat(message.chat);
+    if (typeof message.matchPaused === "boolean") {
+      onMatchPauseRef.current(message.matchPaused, message.pausedBy || null);
+    }
   }, []);
-
-  const onGarbageRef = React.useRef(onGarbage);
-  const onStartRef = React.useRef(onStart);
-  const onMatchWonRef = React.useRef(onMatchWon);
-  const onWinnerRef = React.useRef(onWinner);
-  onGarbageRef.current = onGarbage;
-  onStartRef.current = onStart;
-  onMatchWonRef.current = onMatchWon;
-  onWinnerRef.current = onWinner;
 
   React.useEffect(() => {
     const ws = new WebSocket(getSocketUrl(room, name));
@@ -320,6 +326,7 @@ function useBattleSocket(
       if (message.type === "chat") setChat((current) => [...current.slice(-59), message.message]);
       if (message.type === "garbage") onGarbageRef.current(message.lines);
       if (message.type === "startMatch") onStartRef.current();
+      if (message.type === "matchPause") onMatchPauseRef.current(message.paused, message.by || null);
       if (message.type === "matchWon") onMatchWonRef.current();
       if (message.type === "winner") onWinnerRef.current(message.winner, message.loser);
     };
@@ -359,11 +366,14 @@ function App() {
   const [sideCollapsed, setSideCollapsed] = React.useState(false);
   const [showChat, setShowChat] = React.useState(false);
   const [showInfo, setShowInfo] = React.useState(false);
+  const [paused, setPaused] = React.useState(false);
+  const [pausedBy, setPausedBy] = React.useState<string | null>(null);
   const boardRef = React.useRef(board);
   const activeRef = React.useRef(active);
   const nextPiecesRef = React.useRef(nextPieces);
   const gameOverRef = React.useRef(gameOver);
   const startedRef = React.useRef(started);
+  const pausedRef = React.useRef(paused);
   const lastDrop = React.useRef(0);
   const lockingRef = React.useRef(false);
   const pendingGameOverNotify = React.useRef(false);
@@ -383,6 +393,8 @@ function App() {
     setGameOver(false);
     setEndReason(null);
     setStarted(true);
+    setPaused(false);
+    setPausedBy(null);
     setOpponentSnapshot(null);
     setOpponentNameSnapshot("");
     pendingGameOverNotify.current = false;
@@ -392,6 +404,7 @@ function App() {
     nextPiecesRef.current = queue;
     gameOverRef.current = false;
     startedRef.current = true;
+    pausedRef.current = false;
   }, []);
 
   const finishRound = React.useCallback((message = "Game over", notifyOpponent = false, reason: EndReason = "lost") => {
@@ -404,10 +417,13 @@ function App() {
     setGameOver(true);
     setEndReason(reason);
     setStarted(false);
+    setPaused(false);
+    setPausedBy(null);
     setActive(null);
     setFlash(message);
     gameOverRef.current = true;
     startedRef.current = false;
+    pausedRef.current = false;
     activeRef.current = null;
     lockingRef.current = false;
     setTimeout(() => setFlash(""), 1100);
@@ -415,7 +431,7 @@ function App() {
   }, []);
 
   const handleGarbage = React.useCallback((incoming: number) => {
-    if (!incoming || !startedRef.current || gameOverRef.current) return;
+    if (!incoming || !startedRef.current || gameOverRef.current || pausedRef.current) return;
     setFlash(`+${incoming} garbage`);
     setTimeout(() => setFlash(""), 700);
     setBoard((current) => {
@@ -441,13 +457,24 @@ function App() {
     }, 4500);
   }, [name]);
 
+  const handleMatchPause = React.useCallback((isPaused: boolean, by?: string | null) => {
+    setPaused(isPaused);
+    pausedRef.current = isPaused;
+    setPausedBy(isPaused ? by || null : null);
+    if (isPaused && by && by !== name) {
+      setFlash(`${by} paused`);
+      setTimeout(() => setFlash(""), 900);
+    }
+  }, [name]);
+
   const { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, chat, role, status } = useBattleSocket(
     room,
     name,
     handleGarbage,
     startRound,
     handleMatchWon,
-    handleWinner
+    handleWinner,
+    handleMatchPause
   );
 
   const state: PublicState = { board, active, score, lines, level, started, gameOver };
@@ -474,6 +501,16 @@ function App() {
   const waitingForRematch = gameOver && rematchQueued && rematchReady.length < players.length;
   const opponentLabel = opponent?.name || opponentNameSnapshot || "Waiting for friend";
   const invite = `${location.origin}${location.pathname}?room=${serverRoom}`;
+
+  const canPause = isPlayer && started && !gameOver;
+  const togglePause = React.useCallback(() => {
+    if (!canPause) return;
+    send({ type: "setPause", paused: !paused });
+  }, [canPause, send, paused]);
+
+  React.useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
 
   React.useEffect(() => {
     if (opponent?.state) setOpponentSnapshot(opponent.state);
@@ -508,7 +545,7 @@ function App() {
   const lockPiece = React.useCallback(() => {
     if (lockingRef.current) return;
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current) return;
+    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
     if (!collides(boardRef.current, piece, 0, 1)) return;
     lockingRef.current = true;
 
@@ -553,7 +590,7 @@ function App() {
 
   const move = React.useCallback((dx: number) => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current) return;
+    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
     if (!collides(boardRef.current, piece, dx, 0)) {
       const next = { ...piece, x: piece.x + dx };
       activeRef.current = next;
@@ -563,7 +600,7 @@ function App() {
 
   const softDrop = React.useCallback(() => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current) return;
+    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
     if (!collides(boardRef.current, piece, 0, 1)) {
       const next = { ...piece, y: piece.y + 1 };
       activeRef.current = next;
@@ -575,7 +612,7 @@ function App() {
 
   const hardDrop = React.useCallback(() => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current) return;
+    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
     let y = piece.y;
     while (!collides(boardRef.current, { ...piece, y }, 0, 1)) y++;
     const next = { ...piece, y };
@@ -586,7 +623,7 @@ function App() {
 
   const rotateActive = React.useCallback(() => {
     const piece = activeRef.current;
-    if (!piece || !startedRef.current || gameOverRef.current) return;
+    if (!piece || !startedRef.current || gameOverRef.current || pausedRef.current) return;
     const matrix = rotate(piece.matrix);
     const kick = [0, -1, 1, -2, 2].find((offset) => !collides(boardRef.current, piece, offset, 0, matrix));
     if (kick !== undefined) {
@@ -599,10 +636,15 @@ function App() {
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
+      if (key === "p" && isPlayer && startedRef.current && !gameOverRef.current) {
+        event.preventDefault();
+        togglePause();
+        return;
+      }
       const gameKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", " ", "a", "d", "s", "w"];
       if (!gameKeys.includes(key)) return;
       event.preventDefault();
-      if (!isPlayer || !startedRef.current || gameOverRef.current) return;
+      if (!isPlayer || !startedRef.current || gameOverRef.current || pausedRef.current) return;
       if (event.key === "ArrowLeft" || key === "a") move(-1);
       if (event.key === "ArrowRight" || key === "d") move(1);
       if (event.key === "ArrowDown" || key === "s") softDrop();
@@ -611,15 +653,15 @@ function App() {
     };
     window.addEventListener("keydown", onKey, { passive: false });
     return () => window.removeEventListener("keydown", onKey);
-  }, [hardDrop, isPlayer, move, rotateActive, softDrop]);
+  }, [hardDrop, isPlayer, move, rotateActive, softDrop, togglePause]);
 
-  const mobileControlsActive = isPlayer && started && !gameOver;
+  const mobileControlsActive = isPlayer && started && !gameOver && !paused;
   const boardSwipe = useBoardSwipe(mobileControlsActive, move, softDrop, hardDrop, rotateActive);
 
   React.useEffect(() => {
     let frame = 0;
     const tick = (time: number) => {
-      if (startedRef.current && !gameOverRef.current && time - lastDrop.current > dropIntervalForLevel(level)) {
+      if (startedRef.current && !gameOverRef.current && !pausedRef.current && time - lastDrop.current > dropIntervalForLevel(level)) {
         softDrop();
         lastDrop.current = time;
       }
@@ -756,7 +798,7 @@ function App() {
           <div className="topbar-meta">
             <span className="room-tag"><Users size={14} /> {serverRoom}</span>
             <span className="status-dot" data-connected={status === "Connected"} />
-            <span className="status-text">{isPlayer ? "Playing" : "Spectating"}</span>
+            <span className="status-text">{paused ? "Paused" : isPlayer ? "Playing" : "Spectating"}</span>
           </div>
         </div>
         <div className="actions">
@@ -766,6 +808,14 @@ function App() {
           </form>
           <button onClick={copyInvite} title="Copy invite link"><Copy size={18} /></button>
           <button onClick={rematch} disabled={!canRematch} title="Rematch"><RotateCcw size={18} /></button>
+          <button
+            onClick={togglePause}
+            disabled={!canPause}
+            title={paused ? "Resume (P)" : "Pause (P)"}
+            className={paused ? "active-toggle" : ""}
+          >
+            {paused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
           <button onClick={() => setShowChat(v => !v)} title="Toggle chat" className={showChat ? "active-toggle" : ""}>
             <MessageSquare size={18} />
             {chat.length > 0 && <span className="notif-dot" />}
@@ -865,6 +915,12 @@ function App() {
             </div>
             <BoardView state={primaryState} />
             {flash && <div className="toast">{flash}</div>}
+            {paused && (
+              <div className="pause-overlay">
+                <strong>{pausedBy && pausedBy !== name ? `Paused by ${pausedBy}` : "Paused"}</strong>
+                <button onClick={togglePause}><Play size={18} /> Resume</button>
+              </div>
+            )}
             {showMatchLayout && !started && !gameOver && (
               <button className="start" onClick={startMatch} disabled={!canStartMatch}>
                 <Play size={20} /> {canStartMatch ? "Start game" : "Waiting for opponent"}
