@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft } from "lucide-react";
+import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft, RotateCw, ArrowDown, ChevronsDown } from "lucide-react";
 import "./styles.css";
 
 type Cell = number;
@@ -139,6 +139,120 @@ function PiecePreview({ piece }: { piece: Piece }) {
       {preview.flatMap((row, y) =>
         row.map((cell, x) => <div className={`preview-cell ${cell ? COLORS[cell] : ""}`} key={`${piece.key}-${x}-${y}`} />)
       )}
+    </div>
+  );
+}
+
+function useTouchRepeat(action: () => void) {
+  const timers = React.useRef<{ delay?: number; interval?: number }>({});
+
+  const clear = React.useCallback(() => {
+    if (timers.current.delay) window.clearTimeout(timers.current.delay);
+    if (timers.current.interval) window.clearInterval(timers.current.interval);
+    timers.current = {};
+  }, []);
+
+  React.useEffect(() => () => clear(), [clear]);
+
+  return {
+    onPointerDown: (event: React.PointerEvent) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      action();
+      timers.current.delay = window.setTimeout(() => {
+        timers.current.interval = window.setInterval(action, 75);
+      }, 160);
+    },
+    onPointerUp: clear,
+    onPointerLeave: clear,
+    onPointerCancel: clear
+  };
+}
+
+function useBoardSwipe(
+  enabled: boolean,
+  move: (dx: number) => void,
+  softDrop: () => void,
+  hardDrop: () => void,
+  rotateActive: () => void
+) {
+  const start = React.useRef({ x: 0, y: 0, t: 0 });
+
+  return {
+    onTouchStart: (event: React.TouchEvent) => {
+      if (!enabled) return;
+      const touch = event.touches[0];
+      start.current = { x: touch.clientX, y: touch.clientY, t: Date.now() };
+    },
+    onTouchEnd: (event: React.TouchEvent) => {
+      if (!enabled) return;
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - start.current.x;
+      const dy = touch.clientY - start.current.y;
+      const elapsed = Date.now() - start.current.t;
+      if (elapsed < 260 && Math.abs(dx) < 24 && Math.abs(dy) < 24) {
+        rotateActive();
+        return;
+      }
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 28) {
+        move(dx > 0 ? 1 : -1);
+        return;
+      }
+      if (dy > 36) {
+        if (dy > 92) hardDrop();
+        else softDrop();
+      }
+    }
+  };
+}
+
+function MobileControls({
+  visible,
+  onLeft,
+  onRight,
+  onRotate,
+  onSoftDrop,
+  onHardDrop
+}: {
+  visible: boolean;
+  onLeft: () => void;
+  onRight: () => void;
+  onRotate: () => void;
+  onSoftDrop: () => void;
+  onHardDrop: () => void;
+}) {
+  const left = useTouchRepeat(onLeft);
+  const right = useTouchRepeat(onRight);
+  const down = useTouchRepeat(onSoftDrop);
+  const rotate = useTouchRepeat(onRotate);
+
+  if (!visible) return null;
+
+  return (
+    <div className="mobile-controls" aria-label="Touch controls">
+      <button type="button" className="mobile-btn rotate" aria-label="Rotate" {...rotate}>
+        <RotateCw size={24} />
+      </button>
+      <button type="button" className="mobile-btn left" aria-label="Move left" {...left}>
+        <ChevronLeft size={28} />
+      </button>
+      <button type="button" className="mobile-btn down" aria-label="Soft drop" {...down}>
+        <ArrowDown size={24} />
+      </button>
+      <button type="button" className="mobile-btn right" aria-label="Move right" {...right}>
+        <ChevronRight size={28} />
+      </button>
+      <button
+        type="button"
+        className="mobile-btn hard-drop"
+        aria-label="Hard drop"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          onHardDrop();
+        }}
+      >
+        <ChevronsDown size={26} />
+      </button>
     </div>
   );
 }
@@ -499,6 +613,9 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hardDrop, isPlayer, move, rotateActive, softDrop]);
 
+  const mobileControlsActive = isPlayer && started && !gameOver;
+  const boardSwipe = useBoardSwipe(mobileControlsActive, move, softDrop, hardDrop, rotateActive);
+
   React.useEffect(() => {
     let frame = 0;
     const tick = (time: number) => {
@@ -741,7 +858,7 @@ function App() {
         </section>
       ) : (
         <section className="arena">
-          <div className="playfield">
+          <div className="playfield" {...boardSwipe}>
             <div className="panel-head">
               <span>{primaryName}</span>
               <strong>{primaryScore}</strong>
@@ -822,6 +939,14 @@ function App() {
               </div>
             </div>
           </aside>
+          <MobileControls
+            visible={mobileControlsActive}
+            onLeft={() => move(-1)}
+            onRight={() => move(1)}
+            onRotate={rotateActive}
+            onSoftDrop={softDrop}
+            onHardDrop={hardDrop}
+          />
         </section>
       )}
     </main>
