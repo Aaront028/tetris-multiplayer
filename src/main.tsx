@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Copy, Play, RotateCcw, Users } from "lucide-react";
+import { Copy, LogIn, MessageSquare, Play, RotateCcw, Send, Users, X, ChevronRight, ChevronLeft } from "lucide-react";
 import "./styles.css";
 
 type Cell = number;
@@ -16,7 +16,12 @@ type PublicState = {
   started: boolean;
   gameOver: boolean;
 };
-type Player = { id: string; name: string; connected: boolean; state: PublicState | null };
+type Role = "player" | "spectator";
+type Player = { id: string; name: string; connected: boolean; role?: Role; state: PublicState | null };
+type Spectator = { id: string; name: string; connected: boolean };
+type QueueEntry = { id: string; name: string };
+type ChatMessage = { id: string; at: number; from: string; text: string; system?: boolean };
+type EndReason = "lost" | "won" | null;
 
 const WIDTH = 10;
 const HEIGHT = 20;
@@ -140,9 +145,8 @@ function PiecePreview({ piece }: { piece: Piece }) {
 
 function getSocketUrl(room: string, name: string) {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const host = location.port && location.port !== "3001" ? `${location.hostname}:3001` : location.host;
   const params = new URLSearchParams({ room, name });
-  return `${protocol}//${host}?${params.toString()}`;
+  return `${protocol}//${location.host}/ws?${params.toString()}`;
 }
 
 function useBattleSocket(
@@ -150,14 +154,38 @@ function useBattleSocket(
   name: string,
   onGarbage: (lines: number) => void,
   onStart: () => void,
-  onRematch: () => void,
-  onGameOver: () => void
+  onMatchWon: () => void,
+  onWinner: (winner: string, loser: string) => void
 ) {
   const [socket, setSocket] = React.useState<WebSocket | null>(null);
   const [me, setMe] = React.useState("");
   const [serverRoom, setServerRoom] = React.useState(room);
   const [players, setPlayers] = React.useState<Player[]>([]);
+  const [spectators, setSpectators] = React.useState<Spectator[]>([]);
+  const [queue, setQueue] = React.useState<QueueEntry[]>([]);
+  const [pendingChallengerId, setPendingChallengerId] = React.useState<string | null>(null);
+  const [chat, setChat] = React.useState<ChatMessage[]>([]);
+  const [rematchReady, setRematchReady] = React.useState<string[]>([]);
+  const [role, setRole] = React.useState<Role>("spectator");
   const [status, setStatus] = React.useState("Connecting");
+
+  const applyRoom = React.useCallback((message: any) => {
+    setPlayers(message.players || []);
+    setSpectators(message.spectators || []);
+    setQueue(message.queue || []);
+    setPendingChallengerId(message.pendingChallengerId || null);
+    setRematchReady(message.rematchReady || []);
+    if (message.chat) setChat(message.chat);
+  }, []);
+
+  const onGarbageRef = React.useRef(onGarbage);
+  const onStartRef = React.useRef(onStart);
+  const onMatchWonRef = React.useRef(onMatchWon);
+  const onWinnerRef = React.useRef(onWinner);
+  onGarbageRef.current = onGarbage;
+  onStartRef.current = onStart;
+  onMatchWonRef.current = onMatchWon;
+  onWinnerRef.current = onWinner;
 
   React.useEffect(() => {
     const ws = new WebSocket(getSocketUrl(room, name));
@@ -169,30 +197,38 @@ function useBattleSocket(
       const message = JSON.parse(event.data);
       if (message.type === "welcome") {
         setMe(message.id);
+        setRole(message.role || "spectator");
         setServerRoom(message.room);
-        setPlayers(message.players);
+        applyRoom(message);
         history.replaceState(null, "", `?room=${message.room}`);
       }
-      if (message.type === "players") setPlayers(message.players);
-      if (message.type === "garbage") onGarbage(message.lines);
-      if (message.type === "startMatch") onStart();
-      if (message.type === "rematch") onRematch();
-      if (message.type === "gameOver") onGameOver();
-      if (message.type === "full") setStatus("Room full");
+      if (message.type === "room") applyRoom(message);
+      if (message.type === "chat") setChat((current) => [...current.slice(-59), message.message]);
+      if (message.type === "garbage") onGarbageRef.current(message.lines);
+      if (message.type === "startMatch") onStartRef.current();
+      if (message.type === "matchWon") onMatchWonRef.current();
+      if (message.type === "winner") onWinnerRef.current(message.winner, message.loser);
     };
     return () => ws.close();
-  }, [room, name, onGarbage, onStart, onRematch, onGameOver]);
+  }, [room, name, applyRoom]);
+
+  React.useEffect(() => {
+    if (!me) return;
+    setRole(players.some((player) => player.id === me) ? "player" : "spectator");
+  }, [me, players]);
 
   const send = React.useCallback((message: unknown) => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }, [socket]);
 
-  return { send, me, room: serverRoom, players, status };
+  return { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, chat, role, status };
 }
 
 function App() {
   const params = new URLSearchParams(location.search);
-  const [name] = React.useState(() => localStorage.getItem("battle-name") || `Player ${Math.ceil(Math.random() * 99)}`);
+  const [name, setName] = React.useState(() => localStorage.getItem("battle-name") || `Player ${Math.ceil(Math.random() * 99)}`);
+  const [draftName, setDraftName] = React.useState(name);
+  const [chatText, setChatText] = React.useState("");
   const [room] = React.useState(() => params.get("room") || Math.random().toString(36).slice(2, 8).toUpperCase());
   const [board, setBoard] = React.useState(emptyBoard);
   const [active, setActive] = React.useState<Piece | null>(null);
@@ -200,15 +236,25 @@ function App() {
   const [lines, setLines] = React.useState(0);
   const [level, setLevel] = React.useState(1);
   const [gameOver, setGameOver] = React.useState(false);
+  const [endReason, setEndReason] = React.useState<EndReason>(null);
   const [started, setStarted] = React.useState(false);
   const [nextPieces, setNextPieces] = React.useState<Piece[]>(() => [randomPiece(), randomPiece(), randomPiece()]);
   const [flash, setFlash] = React.useState("");
+  const [winnerBanner, setWinnerBanner] = React.useState("");
+  const [winnerSubtext, setWinnerSubtext] = React.useState("");
+  const [sideCollapsed, setSideCollapsed] = React.useState(false);
+  const [showChat, setShowChat] = React.useState(false);
+  const [showInfo, setShowInfo] = React.useState(false);
   const boardRef = React.useRef(board);
   const activeRef = React.useRef(active);
   const nextPiecesRef = React.useRef(nextPieces);
   const gameOverRef = React.useRef(gameOver);
   const startedRef = React.useRef(started);
   const lastDrop = React.useRef(0);
+  const lockingRef = React.useRef(false);
+  const pendingGameOverNotify = React.useRef(false);
+  const [opponentSnapshot, setOpponentSnapshot] = React.useState<PublicState | null>(null);
+  const [opponentNameSnapshot, setOpponentNameSnapshot] = React.useState("");
 
   const startRound = React.useCallback(() => {
     const fresh = emptyBoard();
@@ -221,7 +267,11 @@ function App() {
     setLines(0);
     setLevel(1);
     setGameOver(false);
+    setEndReason(null);
     setStarted(true);
+    setOpponentSnapshot(null);
+    setOpponentNameSnapshot("");
+    pendingGameOverNotify.current = false;
     lastDrop.current = 0;
     boardRef.current = fresh;
     activeRef.current = piece;
@@ -230,18 +280,24 @@ function App() {
     startedRef.current = true;
   }, []);
 
-  const finishRound = React.useCallback((message = "Game over", notifyOpponent = false) => {
+  const finishRound = React.useCallback((message = "Game over", notifyOpponent = false, reason: EndReason = "lost") => {
+    const piece = activeRef.current;
+    if (piece) {
+      const frozen = merge(boardRef.current, piece);
+      boardRef.current = frozen;
+      setBoard(frozen);
+    }
     setGameOver(true);
+    setEndReason(reason);
     setStarted(false);
     setActive(null);
     setFlash(message);
     gameOverRef.current = true;
     startedRef.current = false;
     activeRef.current = null;
+    lockingRef.current = false;
     setTimeout(() => setFlash(""), 1100);
-    if (notifyOpponent) {
-      window.dispatchEvent(new CustomEvent("battle-game-over"));
-    }
+    if (notifyOpponent) pendingGameOverNotify.current = true;
   }, []);
 
   const handleGarbage = React.useCallback((incoming: number) => {
@@ -256,22 +312,70 @@ function App() {
     });
   }, [finishRound]);
 
-  const handleOpponentGameOver = React.useCallback(() => {
-    finishRound("Opponent topped out");
+  const handleMatchWon = React.useCallback(() => {
+    if (gameOverRef.current) return;
+    finishRound("You won!", false, "won");
   }, [finishRound]);
 
-  const { send, me, room: serverRoom, players, status } = useBattleSocket(
+  const handleWinner = React.useCallback((winner: string, loser: string) => {
+    const isYou = winner === name;
+    setWinnerBanner(isYou ? `You win!` : `${winner} wins!`);
+    setWinnerSubtext(isYou ? `${loser} was defeated` : `${loser} lost`);
+    setTimeout(() => {
+      setWinnerBanner("");
+      setWinnerSubtext("");
+    }, 4500);
+  }, [name]);
+
+  const { send, me, room: serverRoom, players, spectators, queue, pendingChallengerId, rematchReady, chat, role, status } = useBattleSocket(
     room,
     name,
     handleGarbage,
     startRound,
-    startRound,
-    handleOpponentGameOver
+    handleMatchWon,
+    handleWinner
   );
 
   const state: PublicState = { board, active, score, lines, level, started, gameOver };
-  const opponent = players.find((player) => player.id !== me);
+  const connected = Boolean(me);
+  const isPlayer = connected && players.some((player) => player.id === me);
+  const liveMatchUnderway = players.filter((player) => player.state?.started && !player.state?.gameOver).length >= 2;
+  const shouldSpectateLiveMatch = !isPlayer && liveMatchUnderway;
+  const showMatchLayout = isPlayer || (gameOver && !shouldSpectateLiveMatch);
+  const canJoinMatch = connected && !isPlayer && players.length < 2;
+  const primaryPlayer = isPlayer ? players.find((player) => player.id === me) : players[0];
+  const opponent = isPlayer ? players.find((player) => player.id !== me) : players[1];
+  const opponentState = opponent?.state || (gameOver ? opponentSnapshot : null);
+  const primaryState = showMatchLayout ? state : primaryPlayer?.state || null;
+  const primaryName = showMatchLayout ? name : primaryPlayer?.name || "Waiting for player";
+  const primaryScore = showMatchLayout ? score : primaryPlayer?.state?.score || 0;
+  const queued = queue.some((entry) => entry.id === me);
+  const queuePosition = queue.findIndex((entry) => entry.id === me) + 1;
+  const hasChallengeOffer = pendingChallengerId === me;
+  const nextInQueue = queue[0];
+  const hasQueueWaiting = queue.length > 0;
+  const canRematch = gameOver && endReason === "won" && !hasQueueWaiting && !pendingChallengerId && players.length >= 2 && players.every((player) => player.connected);
+  const canStartMatch = (isPlayer || gameOver) && players.length >= 2 && players.every((player) => player.connected);
+  const rematchQueued = rematchReady.includes(me);
+  const waitingForRematch = gameOver && rematchQueued && rematchReady.length < players.length;
+  const opponentLabel = opponent?.name || opponentNameSnapshot || "Waiting for friend";
   const invite = `${location.origin}${location.pathname}?room=${serverRoom}`;
+
+  React.useEffect(() => {
+    if (opponent?.state) setOpponentSnapshot(opponent.state);
+    if (opponent?.name) setOpponentNameSnapshot(opponent.name);
+  }, [opponent?.state, opponent?.name]);
+
+  React.useEffect(() => {
+    if (!shouldSpectateLiveMatch || !gameOver) return;
+    setGameOver(false);
+    setEndReason(null);
+    setStarted(false);
+    setActive(null);
+    gameOverRef.current = false;
+    startedRef.current = false;
+    activeRef.current = null;
+  }, [shouldSpectateLiveMatch, gameOver]);
 
   React.useEffect(() => {
     boardRef.current = board;
@@ -279,18 +383,21 @@ function App() {
     nextPiecesRef.current = nextPieces;
     gameOverRef.current = gameOver;
     startedRef.current = started;
-    send({ type: "state", state });
-  }, [board, active, nextPieces, score, lines, level, started, gameOver, send]);
-
-  React.useEffect(() => {
-    const onBattleGameOver = () => send({ type: "gameOver" });
-    window.addEventListener("battle-game-over", onBattleGameOver);
-    return () => window.removeEventListener("battle-game-over", onBattleGameOver);
-  }, [send]);
+    const liveState: PublicState = { board, active, score, lines, level, started, gameOver };
+    if (isPlayer) send({ type: "state", state: liveState });
+    if (pendingGameOverNotify.current && gameOver && isPlayer) {
+      pendingGameOverNotify.current = false;
+      send({ type: "gameOver" });
+    }
+  }, [board, active, nextPieces, score, lines, level, started, gameOver, isPlayer, send]);
 
   const lockPiece = React.useCallback(() => {
+    if (lockingRef.current) return;
     const piece = activeRef.current;
     if (!piece || !startedRef.current || gameOverRef.current) return;
+    if (!collides(boardRef.current, piece, 0, 1)) return;
+    lockingRef.current = true;
+
     const merged = merge(boardRef.current, piece);
     const result = clearLines(merged);
     const queue = nextPiecesRef.current.length ? nextPiecesRef.current : [randomPiece(), randomPiece(), randomPiece()];
@@ -306,19 +413,28 @@ function App() {
     }
 
     if (collides(result.board, nextPiece)) {
-      finishRound("Game over", true);
-    } else {
-      setActive(nextPiece);
-      activeRef.current = nextPiece;
-      setNextPieces(nextQueue);
-      nextPiecesRef.current = nextQueue;
+      setBoard(result.board);
+      boardRef.current = result.board;
+      setLines(newLines);
+      setLevel(newLevel);
+      setScore((value) => value + [0, 100, 300, 500, 800][result.cleared] * newLevel + 12);
+      activeRef.current = null;
+      setActive(null);
+      lockingRef.current = false;
+      finishRound("Game over", true, "lost");
+      return;
     }
 
+    setActive(nextPiece);
+    activeRef.current = nextPiece;
+    setNextPieces(nextQueue);
+    nextPiecesRef.current = nextQueue;
     setBoard(result.board);
     boardRef.current = result.board;
     setLines(newLines);
     setLevel(newLevel);
     setScore((value) => value + [0, 100, 300, 500, 800][result.cleared] * newLevel + 12);
+    lockingRef.current = false;
   }, [finishRound, lines, send]);
 
   const move = React.useCallback((dx: number) => {
@@ -351,7 +467,7 @@ function App() {
     const next = { ...piece, y };
     activeRef.current = next;
     setActive(next);
-    setTimeout(lockPiece, 0);
+    lockPiece();
   }, [lockPiece]);
 
   const rotateActive = React.useCallback(() => {
@@ -368,18 +484,20 @@ function App() {
 
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "ArrowLeft" || event.key.toLowerCase() === "a") move(-1);
-      if (event.key === "ArrowRight" || event.key.toLowerCase() === "d") move(1);
-      if (event.key === "ArrowDown" || event.key.toLowerCase() === "s") softDrop();
-      if (event.key === "ArrowUp" || event.key.toLowerCase() === "w") rotateActive();
-      if (event.key === " ") {
-        event.preventDefault();
-        hardDrop();
-      }
+      const key = event.key.toLowerCase();
+      const gameKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", " ", "a", "d", "s", "w"];
+      if (!gameKeys.includes(key)) return;
+      event.preventDefault();
+      if (!isPlayer || !startedRef.current || gameOverRef.current) return;
+      if (event.key === "ArrowLeft" || key === "a") move(-1);
+      if (event.key === "ArrowRight" || key === "d") move(1);
+      if (event.key === "ArrowDown" || key === "s") softDrop();
+      if (event.key === "ArrowUp" || key === "w") rotateActive();
+      if (event.key === " ") hardDrop();
     };
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { passive: false });
     return () => window.removeEventListener("keydown", onKey);
-  }, [hardDrop, move, rotateActive, softDrop]);
+  }, [hardDrop, isPlayer, move, rotateActive, softDrop]);
 
   React.useEffect(() => {
     let frame = 0;
@@ -400,73 +518,312 @@ function App() {
     setTimeout(() => setFlash(""), 700);
   };
 
+  const saveName = (event: React.FormEvent) => {
+    event.preventDefault();
+    const clean = draftName.trim().slice(0, 18) || name;
+    localStorage.setItem("battle-name", clean);
+    send({ type: "rename", name: clean });
+    setName(clean);
+    setDraftName(clean);
+  };
+
+  const sendChat = (event: React.FormEvent) => {
+    event.preventDefault();
+    const text = chatText.trim();
+    if (!text) return;
+    send({ type: "chat", text });
+    setChatText("");
+  };
+
   const startMatch = () => {
-    startRound();
+    if (!canStartMatch) return;
     send({ type: "startMatch" });
   };
 
   const rematch = () => {
-    startRound();
+    if (!canRematch) return;
     send({ type: "rematch" });
   };
 
+  const becomePlayer = () => send({ type: "becomePlayer" });
+  const joinQueue = () => send({ type: "joinQueue" });
+  const leaveQueue = () => send({ type: "leaveQueue" });
+  const acceptChallenge = () => send({ type: "acceptChallenge" });
+  const passChallenge = () => send({ type: "passChallenge" });
+
+  const renderQueuePanel = () => (
+    <div className="queue-panel">
+      {hasChallengeOffer ? (
+        <>
+          <strong>Play winner?</strong>
+          <div className="queue-actions">
+            <button onClick={acceptChallenge}><Play size={16} /> Play</button>
+            <button onClick={passChallenge}>Pass</button>
+          </div>
+        </>
+      ) : queued ? (
+        <>
+          <span>Queued #{queuePosition}</span>
+          <button onClick={leaveQueue}>Leave queue</button>
+        </>
+      ) : (
+        <button onClick={joinQueue}><Play size={16} /> Join queue</button>
+      )}
+    </div>
+  );
+
+  const renderRoomPanel = () => (
+    <div className="room-panel">
+      <div className="panel-head">
+        <span>Room</span>
+        <strong>{spectators.length}</strong>
+      </div>
+      <div className="room-list">
+        <span>Players</span>
+        <b>{players.map((player) => player.name).join(" vs ") || "Waiting"}</b>
+        <span>Queue</span>
+        <b>{queue.map((entry) => entry.name).join(", ") || "Empty"}</b>
+        <span>Spectators</span>
+        <b>{spectators.map((spectator) => spectator.name).join(", ") || "None"}</b>
+      </div>
+    </div>
+  );
+
+  const renderChatPanel = (autoFocus = false) => (
+    <div className="chat-panel">
+      <div className="chat-log">
+        {chat.map((message) => (
+          <div className={message.system ? "chat-message system" : "chat-message"} key={message.id}>
+            <strong>{message.from}</strong>
+            <span>{message.text}</span>
+          </div>
+        ))}
+      </div>
+      <form className="chat-form" onSubmit={sendChat}>
+        <input
+          value={chatText}
+          onChange={(event) => setChatText(event.target.value)}
+          maxLength={220}
+          aria-label="Chat message"
+          autoFocus={autoFocus}
+        />
+        <button type="submit"><Send size={16} /></button>
+      </form>
+    </div>
+  );
+
+  const renderPlayersList = () => (
+    <div className="compact-room-panel">
+      <div className="player-badge">
+        <Users size={14} />
+        <span>{players.length + spectators.length}</span>
+        <span className="divider">|</span>
+        <span>{players.map(p => p.name).join(" vs ") || "Waiting"}</span>
+      </div>
+    </div>
+  );
+
   return (
     <main className="app">
+      {winnerBanner && (
+        <div className="winner-overlay" role="status" aria-live="assertive">
+          <div className="winner-content">
+            <div className="winner-banner">{winnerBanner}</div>
+            {winnerSubtext && <div className="winner-subtext">{winnerSubtext}</div>}
+          </div>
+        </div>
+      )}
       <section className="topbar">
-        <div>
+        <div className="topbar-left">
           <h1>Battle Tetris</h1>
-          <p><Users size={16} /> Room {serverRoom} - {status}</p>
+          <div className="topbar-meta">
+            <span className="room-tag"><Users size={14} /> {serverRoom}</span>
+            <span className="status-dot" data-connected={status === "Connected"} />
+            <span className="status-text">{isPlayer ? "Playing" : "Spectating"}</span>
+          </div>
         </div>
         <div className="actions">
-          <button onClick={copyInvite}><Copy size={18} /> Invite</button>
-          <button onClick={rematch}><RotateCcw size={18} /> Rematch</button>
+          <form className="name-form" onSubmit={saveName}>
+            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={18} aria-label="Username" />
+            <button type="submit" title="Save name"><LogIn size={18} /></button>
+          </form>
+          <button onClick={copyInvite} title="Copy invite link"><Copy size={18} /></button>
+          <button onClick={rematch} disabled={!canRematch} title="Rematch"><RotateCcw size={18} /></button>
+          <button onClick={() => setShowChat(v => !v)} title="Toggle chat" className={showChat ? "active-toggle" : ""}>
+            <MessageSquare size={18} />
+            {chat.length > 0 && <span className="notif-dot" />}
+          </button>
+          <button onClick={() => setShowInfo(v => !v)} title="Toggle room info" className={showInfo ? "active-toggle" : ""}>
+            <Users size={18} />
+          </button>
+          <button onClick={() => setSideCollapsed(v => !v)} title="Toggle controls panel">
+            {sideCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
+          </button>
         </div>
       </section>
 
-      <section className="arena">
-        <div className="playfield">
-          <div className="panel-head">
-            <span>{name}</span>
-            <strong>{score}</strong>
-          </div>
-          <BoardView state={state} />
-          {flash && <div className="toast">{flash}</div>}
-          {!started && !gameOver && <button className="start" onClick={startMatch}><Play size={20} /> Start game</button>}
-          {gameOver && (
-            <div className="game-over">
-              <strong>Game over</strong>
-              <button onClick={rematch}><RotateCcw size={20} /> Play again</button>
+      {showChat && (
+        <div className="popup-overlay" onClick={() => setShowChat(false)}>
+          <div className="popup chat-popup" onClick={(e) => e.stopPropagation()}>
+            <div className="popup-header">
+              <span><MessageSquare size={16} /> Chat</span>
+              <button onClick={() => setShowChat(false)} className="close-btn"><X size={18} /></button>
             </div>
-          )}
+            {renderChatPanel(true)}
+          </div>
         </div>
+      )}
 
-        <aside className="side">
-          <div className="stats">
-            <span>Lines <strong>{lines}</strong></span>
-            <span>Level <strong>{level}</strong></span>
+      {showInfo && (
+        <div className="popup-overlay" onClick={() => setShowInfo(false)}>
+          <div className="popup info-popup" onClick={e => e.stopPropagation()}>
+            <div className="popup-header">
+              <span><Users size={16} /> Room Info</span>
+              <button onClick={() => setShowInfo(false)} className="close-btn"><X size={18} /></button>
+            </div>
+            {renderRoomPanel()}
+            {!isPlayer && renderQueuePanel()}
+            <div className="popup-actions">
+              {canJoinMatch && (
+                <button onClick={() => { becomePlayer(); setShowInfo(false); }}><Play size={16} /> Join match</button>
+              )}
+              <button onClick={copyInvite}><Copy size={16} /> Copy invite</button>
+            </div>
           </div>
-          <div className="next-panel">
+        </div>
+      )}
+
+      {!connected ? (
+        <section className="watch-arena loading-view">
+          <div className="spectator-badge">Connecting to room...</div>
+        </section>
+      ) : !showMatchLayout ? (
+        <section className="watch-arena">
+          <div className="watch-boards">
+            {[players[0], players[1]].map((player, index) => (
+              <div className="watch-player" key={player?.id || `empty-${index}`}>
+                <div className="panel-head">
+                  <span>{player?.name || `Waiting for player ${index + 1}`}</span>
+                  <strong>{player?.state?.score || 0}</strong>
+                </div>
+                <BoardView state={player?.state || null} />
+                <div className="watch-stats">
+                  <span>Lines <strong>{player?.state?.lines || 0}</strong></span>
+                  <span>Level <strong>{player?.state?.level || 1}</strong></span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="watch-actions">
+            {canJoinMatch && (
+              <button onClick={becomePlayer}><Play size={16} /> Join match</button>
+            )}
+            {hasChallengeOffer ? (
+              <div className="queue-inline">
+                <strong>Play winner?</strong>
+                <button onClick={acceptChallenge}><Play size={16} /> Play</button>
+                <button onClick={passChallenge}>Pass</button>
+              </div>
+            ) : queued ? (
+              <div className="queue-inline">
+                <span>Queued #{queuePosition}</span>
+                {liveMatchUnderway && <span className="watching-tag">· Watching</span>}
+                <button onClick={leaveQueue}>Leave queue</button>
+              </div>
+            ) : (
+              <button onClick={joinQueue}><Play size={16} /> Join queue</button>
+            )}
+            {liveMatchUnderway && !queued && !hasChallengeOffer && (
+              <span className="queue-inline watching-tag">Watching live match</span>
+            )}
+          </div>
+        </section>
+      ) : (
+        <section className="arena">
+          <div className="playfield">
             <div className="panel-head">
-              <span>Next pieces</span>
+              <span>{primaryName}</span>
+              <strong>{primaryScore}</strong>
             </div>
-            <div className="next-list">
-              {nextPieces.map((piece, index) => <PiecePreview piece={piece} key={`${piece.key}-${index}`} />)}
+            <BoardView state={primaryState} />
+            {flash && <div className="toast">{flash}</div>}
+            {showMatchLayout && !started && !gameOver && (
+              <button className="start" onClick={startMatch} disabled={!canStartMatch}>
+                <Play size={20} /> {canStartMatch ? "Start game" : "Waiting for opponent"}
+              </button>
+            )}
+            {showMatchLayout && gameOver && (
+              <div className="game-over">
+                <strong>{endReason === "won" ? "You win!" : "Game over"}</strong>
+                <span className="game-over-detail">
+                  {endReason === "won"
+                    ? hasQueueWaiting
+                      ? `${nextInQueue?.name || "Next player"} is up next.`
+                      : players.length < 2
+                        ? "Waiting for an opponent to join the queue."
+                        : "Your opponent was defeated."
+                    : "Your board topped out."}
+                </span>
+                {endReason === "won" && canRematch && (
+                  <button onClick={rematch} disabled={rematchQueued}>
+                    <RotateCcw size={20} /> {waitingForRematch ? "Waiting for opponent..." : rematchQueued ? "Ready" : "Play again"}
+                  </button>
+                )}
+                {endReason === "lost" && hasChallengeOffer && (
+                  <div className="queue-actions">
+                    <button onClick={acceptChallenge}><Play size={20} /> Play winner</button>
+                    <button onClick={passChallenge}>Pass</button>
+                  </div>
+                )}
+                {endReason === "lost" && !queued && !hasChallengeOffer && (
+                  <button onClick={joinQueue}><Play size={20} /> Join queue</button>
+                )}
+                {endReason === "lost" && queued && !hasChallengeOffer && (
+                  <span className="game-over-detail">Queued #{queuePosition} — you'll play when it's your turn.</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          <aside className={"side" + (sideCollapsed ? " collapsed" : "")}>
+            <div className="stats">
+              <span>Lines <strong>{lines}</strong></span>
+              <span>Level <strong>{level}</strong></span>
             </div>
-          </div>
-          <div className="opponent">
-            <div className="panel-head">
-              <span>{opponent?.name || "Waiting for friend"}</span>
-              <strong>{opponent?.state?.score || 0}</strong>
+
+            {renderPlayersList()}
+
+            <div className="next-panel">
+              <div className="panel-head">
+                <span>Next pieces</span>
+              </div>
+              <div className="next-list">
+                {nextPieces.map((piece, index) => <PiecePreview piece={piece} key={`${piece.key}-${index}`} />)}
+              </div>
             </div>
-            <BoardView state={opponent?.state || null} small />
-          </div>
-          <div className="keys">
-            <span>Move</span><b>A/D or Arrows</b>
-            <span>Rotate</span><b>W or Up</b>
-            <span>Drop</span><b>Space</b>
-          </div>
-        </aside>
-      </section>
+
+            <div className="opponent">
+              <div className="panel-head">
+                <span>{opponentLabel}</span>
+                <strong>{opponentState?.score ?? opponent?.state?.score ?? 0}</strong>
+              </div>
+              <BoardView state={opponentState} small />
+            </div>
+
+            <div className="keyboard-controls">
+              <div className="panel-head">
+                <span>Controls</span>
+              </div>
+              <div className="keys">
+                <span>Move</span><b>A/D or ←/→</b>
+                <span>Rotate</span><b>W or ↑</b>
+                <span>Drop</span><b>Space</b>
+              </div>
+            </div>
+          </aside>
+        </section>
+      )}
     </main>
   );
 }
