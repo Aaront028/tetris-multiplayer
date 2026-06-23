@@ -1231,7 +1231,8 @@ input {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   gap: 10px;
 }
 
@@ -1239,28 +1240,42 @@ input {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  align-items: center;
+  align-items: stretch;
   flex: 1 1 auto;
   min-height: 0;
 }
 
 .watch-player {
+  position: relative;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 8px;
   height: 100%;
 }
 
-.watch-player .board {
-  width: min(100%, 100%, calc((100dvh - 130px) / 2));
-  max-height: calc(100dvh - 130px);
+.watch-board-frame {
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  container-type: size;
+}
+
+.watch-board-frame .board {
+  height: min(100cqh, calc(100cqw * 2));
+  width: min(100cqw, calc(100cqh / 2));
+  max-width: 100%;
+  max-height: 100%;
   margin: 0 auto;
 }
 
 .watch-player .panel-head,
 .watch-stats {
-  width: min(100%, calc((100dvh - 130px) / 2));
+  width: 100%;
+  max-width: 520px;
   margin-left: auto;
   margin-right: auto;
 }
@@ -1295,6 +1310,71 @@ input {
   gap: 10px;
   flex: 0 0 auto;
   flex-wrap: wrap;
+}
+
+.watch-result-banner {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  text-align: center;
+  border: 1px solid rgba(255, 207, 93, 0.45);
+  border-radius: 10px;
+  background: rgba(20, 25, 35, 0.92);
+  padding: 12px 16px;
+  flex: 0 0 auto;
+}
+
+.watch-result-banner strong {
+  color: #ffcf5d;
+  font-size: 1.2rem;
+}
+
+.watch-result-banner span {
+  color: #aeb8c8;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.watch-player-won {
+  outline: 2px solid rgba(47, 217, 107, 0.65);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.watch-player-lost {
+  outline: 2px solid rgba(240, 68, 82, 0.45);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.watch-outcome-tag {
+  position: absolute;
+  top: 36px;
+  right: 8px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.watch-outcome-tag.won {
+  background: rgba(47, 217, 107, 0.2);
+  color: #8dffb0;
+  border: 1px solid rgba(47, 217, 107, 0.45);
+}
+
+.watch-outcome-tag.lost {
+  background: rgba(240, 68, 82, 0.16);
+  color: #ff9aa0;
+  border: 1px solid rgba(240, 68, 82, 0.4);
+}
+
+.watch-outcome-tag.practice {
+  background: rgba(255, 207, 93, 0.16);
+  color: #ffcf5d;
+  border: 1px solid rgba(255, 207, 93, 0.4);
 }
 
 .queue-inline {
@@ -1470,16 +1550,20 @@ input {
   .watch-boards {
     grid-template-columns: 1fr;
     align-content: start;
-    overflow-y: auto;
+    overflow: visible;
   }
 
-  .watch-player .board {
-    width: min(100%, calc((100dvh - 180px) / 2));
-    max-height: calc((100dvh - 180px) / 2);
+  .watch-player {
+    height: auto;
+    min-height: min(70dvh, 560px);
+  }
+
+  .watch-board-frame {
+    min-height: min(52dvh, 420px);
   }
 
   .watch-player .panel-head,
   .watch-stats {
-    width: min(100%, calc((100dvh - 180px) / 2));
+    max-width: min(100%, calc((100dvh - 220px) / 2));
   }
 }

@@ -22,7 +22,7 @@ if (process.env.NODE_ENV === "production" || existsSync(dist)) {
 
 function getRoom(code) {
   const key = (code || randomRoom()).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
-  if (!rooms.has(key)) rooms.set(key, { clients: new Map(), activeIds: [], queue: [], pendingChallengerId: null, chat: [], rematchReady: new Set(), matchPaused: false, pausedBy: null, practiceMode: false });
+  if (!rooms.has(key)) rooms.set(key, { clients: new Map(), activeIds: [], queue: [], pendingChallengerId: null, chat: [], rematchReady: new Set(), matchPaused: false, pausedBy: null, practiceMode: false, lastMatch: null });
   return [key, rooms.get(key)];
 }
 
@@ -73,7 +73,8 @@ function roomSnapshot(room) {
     rematchReady: [...(room.rematchReady || [])].filter((readyId) => room.clients.has(readyId)),
     matchPaused: Boolean(room.matchPaused),
     pausedBy: room.pausedBy || null,
-    practiceMode: Boolean(room.practiceMode)
+    practiceMode: Boolean(room.practiceMode),
+    lastMatch: room.lastMatch || null
   };
 }
 
@@ -97,12 +98,27 @@ function broadcast(room, data) {
   for (const client of room.clients.values()) safeSend(client.ws, data);
 }
 
+function broadcastWinner(room, winnerName, loserName, winnerClient, loserClient) {
+  const payload = {
+    winner: winnerName,
+    loser: loserName,
+    results: [
+      { name: winnerName, state: winnerClient?.state || null, won: true },
+      { name: loserName, state: loserClient?.state || null, won: false }
+    ],
+    at: Date.now()
+  };
+  room.lastMatch = payload;
+  broadcast(room, { type: "winner", ...payload });
+}
+
 function beginMatch(room, by) {
   const activeClients = room.activeIds.map((activeId) => room.clients.get(activeId)).filter(Boolean);
   const ready = activeClients.length >= 2 && activeClients.every((entry) => entry.ws.readyState === entry.ws.OPEN);
   if (!ready) return false;
   room.rematchReady = new Set();
   room.practiceMode = false;
+  room.lastMatch = null;
   room.matchPaused = false;
   room.pausedBy = null;
   for (const activeId of room.activeIds) {
@@ -123,6 +139,7 @@ function beginSoloPractice(room, by) {
   if (!client || client.ws.readyState !== client.ws.OPEN) return false;
   room.rematchReady = new Set();
   room.practiceMode = true;
+  room.lastMatch = null;
   room.matchPaused = false;
   room.pausedBy = null;
   client.state = null;
@@ -156,6 +173,31 @@ function removeFromQueue(room, id) {
   if (room.pendingChallengerId === id) room.pendingChallengerId = null;
 }
 
+function getStandingWinnerId(room) {
+  if (room.activeIds.length === 1) return room.activeIds[0];
+  if (room.activeIds.length === 2 && room.lastMatch) {
+    const winnerName = room.lastMatch.winner;
+    if (!winnerName) return null;
+    const winner = [...room.clients.values()].find(
+      (client) => client.name === winnerName && room.activeIds.includes(client.id)
+    );
+    return winner?.id || null;
+  }
+  return null;
+}
+
+function releaseLoserForQueue(room) {
+  if (!room.lastMatch || room.activeIds.length !== 2) return;
+  const loserName = room.lastMatch.loser;
+  const loser = [...room.clients.values()].find(
+    (client) => client.name === loserName && room.activeIds.includes(client.id)
+  );
+  if (!loser) return;
+  loser.role = "spectator";
+  room.activeIds = room.activeIds.filter((activeId) => activeId !== loser.id);
+  room.rematchReady?.delete(loser.id);
+}
+
 function startQueuedChallenger(room, challengerId) {
   if (room.activeIds.length !== 1) return false;
   const challenger = room.clients.get(challengerId);
@@ -172,8 +214,15 @@ function startQueuedChallenger(room, challengerId) {
 }
 
 function offerNextChallenger(room, winnerId) {
-  if (!winnerId || !room.clients.has(winnerId) || room.pendingChallengerId) return;
-  const nextId = room.queue.find((id) => room.clients.has(id) && !room.activeIds.includes(id));
+  const standingWinnerId = winnerId || getStandingWinnerId(room);
+  if (!standingWinnerId || !room.clients.has(standingWinnerId)) return;
+  if (room.pendingChallengerId) return;
+
+  releaseLoserForQueue(room);
+
+  if (room.activeIds.length !== 1 || room.activeIds[0] !== standingWinnerId) return;
+
+  const nextId = room.queue.find((queuedId) => room.clients.has(queuedId) && !room.activeIds.includes(queuedId));
   if (!nextId) return;
   startQueuedChallenger(room, nextId);
 }
@@ -272,7 +321,6 @@ wss.on("connection", (ws, request) => {
       const matchWasLive = Boolean(winner?.state?.started && (client.state?.started || client.state?.gameOver));
       if (!matchWasLive) return;
 
-      client.role = "spectator";
       if (client.state) {
         client.state = { ...client.state, gameOver: true, started: false, active: null };
       }
@@ -280,14 +328,21 @@ wss.on("connection", (ws, request) => {
       room.matchPaused = false;
       room.pausedBy = null;
       removeFromQueue(room, loserId);
-      room.activeIds = room.activeIds.filter((activeId) => activeId !== loserId);
+      const queueWaiting = room.queue.length > 0;
+
+      if (queueWaiting) {
+        client.role = "spectator";
+        room.activeIds = room.activeIds.filter((activeId) => activeId !== loserId);
+      } else {
+        client.role = "player";
+      }
 
       if (winnerId) {
-        const winner = room.clients.get(winnerId);
-        addChat(room, client, `${winner?.name || "Winner"} beat ${client.name}.`, true);
-        broadcast(room, { type: "winner", winner: winner?.name || "Winner", loser: client.name, at: Date.now() });
-        safeSend(winner.ws, { type: "matchWon", loserId });
-        offerNextChallenger(room, winnerId);
+        const winnerClient = room.clients.get(winnerId);
+        addChat(room, client, `${winnerClient?.name || "Winner"} beat ${client.name}.`, true);
+        broadcastWinner(room, winnerClient?.name || "Winner", client.name, winnerClient, client);
+        safeSend(winnerClient.ws, { type: "matchWon", loserId });
+        if (queueWaiting) offerNextChallenger(room, winnerId);
       }
       broadcastRoom(room);
     }
@@ -313,22 +368,19 @@ wss.on("connection", (ws, request) => {
     }
     if (message.type === "joinQueue" && !isActive) {
       if (!room.queue.includes(id)) room.queue.push(id);
-      const winnerId = room.activeIds.length === 1 ? room.activeIds[0] : null;
-      offerNextChallenger(room, winnerId);
+      offerNextChallenger(room, getStandingWinnerId(room));
       broadcastRoom(room);
     }
 
     if (message.type === "leaveQueue" && !isActive) {
       removeFromQueue(room, id);
-      const winnerId = room.activeIds.length === 1 ? room.activeIds[0] : null;
-      offerNextChallenger(room, winnerId);
+      offerNextChallenger(room, getStandingWinnerId(room));
       broadcastRoom(room);
     }
 
     if (message.type === "passChallenge" && room.pendingChallengerId === id) {
       removeFromQueue(room, id);
-      const winnerId = room.activeIds.length === 1 ? room.activeIds[0] : null;
-      offerNextChallenger(room, winnerId);
+      offerNextChallenger(room, getStandingWinnerId(room));
       broadcastRoom(room);
     }
 
@@ -362,7 +414,7 @@ wss.on("connection", (ws, request) => {
       const winner = room.clients.get(winnerId);
       const matchWasLive = Boolean(client.state?.started && winner?.state?.started);
       if (winner && matchWasLive) {
-        broadcast(room, { type: "winner", winner: winner.name, loser: client.name, at: Date.now() });
+        broadcastWinner(room, winner.name, client.name, winner, client);
         safeSend(winner.ws, { type: "matchWon", loserId: id });
         offerNextChallenger(room, winnerId);
       } else if (winner && client.state?.started) {
